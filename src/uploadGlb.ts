@@ -273,7 +273,7 @@ export class GLTFPrimitive {
 
         bundleEncoder.setPipeline(renderPipeline);
         bundleEncoder.setBindGroup(2, this.material.bindGroup);
-        
+
         bundleEncoder.setVertexBuffer(0,
             this.positions.view.gpuBuffer,
             this.positions.byteOffset,
@@ -439,10 +439,17 @@ export class GLTFMaterial {
     constructor(material, textures) {
         this.baseColorFactor = [1, 1, 1, 1];
         this.baseColorTexture = null;
-        // padded to float4
         this.emissiveFactor = [0, 0, 0, 1];
+        this.emissiveTexture = null
+        this.emissiveSampler = null
+        this.occlusionTexture = null
+        this.occlusionSampler = null
         this.metallicFactor = 1.0;
         this.roughnessFactor = 1.0;
+        this.metallicRoughnessTexture = null
+        this.metallicRoughnessSampler = null
+        this.normalTexture = null
+        this.normalSampler = null
 
         if (material['pbrMetallicRoughness'] !== undefined) {
             var pbr = material['pbrMetallicRoughness'];
@@ -459,11 +466,27 @@ export class GLTFMaterial {
             if (pbr['roughnessFactor'] !== undefined) {
                 this.roughnessFactor = pbr['roughnessFactor'];
             }
+            if (pbr['metallicRoughnessTexture'] !== undefined) {
+                this.metallicRoughnessTexture = textures[pbr['metallicRoughnessTexture']['index']];
+                this.metallicRoughnessSampler = this.metallicRoughnessTexture.sampler;
+            }
         }
         if (material['emissiveFactor'] !== undefined) {
             this.emissiveFactor[0] = material['emissiveFactor'][0];
             this.emissiveFactor[1] = material['emissiveFactor'][1];
             this.emissiveFactor[2] = material['emissiveFactor'][2];
+        }
+        if (material['emissiveTexture'] !== undefined) {
+            this.emissiveTexture = textures[material['emissiveTexture']['index']];
+            this.emissiveSampler = this.emissiveTexture.sampler;
+        }
+        if (material['occlusionTexture'] !== undefined) {
+            this.occlusionTexture = textures[material['occlusionTexture']['index']];
+            this.occlusionSampler = this.occlusionTexture.sampler;
+        }
+        if (material['normalTexture'] !== undefined) {
+            this.normalTexture = textures[material['normalTexture']['index']];
+            this.normalSampler = this.normalTexture.sampler;
         }
 
         this.gpuBuffer = null;
@@ -503,6 +526,62 @@ export class GLTFMaterial {
             bindGroupEntries.push({
                 binding: 2,
                 resource: this.baseColorTexture.imageView,
+            });
+        }
+
+        if (this.emissiveTexture) {
+            layoutEntries.push({ binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} });
+            layoutEntries.push({ binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {} });
+
+            bindGroupEntries.push({
+                binding: 3,
+                resource: this.emissiveSampler,
+            });
+            bindGroupEntries.push({
+                binding: 4,
+                resource: this.emissiveTexture.imageView,
+            });
+        }
+
+        if (this.occlusionTexture) {
+            layoutEntries.push({ binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: {} });
+            layoutEntries.push({ binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: {} });
+
+            bindGroupEntries.push({
+                binding: 5,
+                resource: this.occlusionSampler,
+            });
+            bindGroupEntries.push({
+                binding: 6,
+                resource: this.occlusionTexture.imageView,
+            });
+        }
+
+        if (this.normalTexture) {
+            layoutEntries.push({ binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: {} });
+            layoutEntries.push({ binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: {} });
+
+            bindGroupEntries.push({
+                binding: 7,
+                resource: this.normalSampler,
+            });
+            bindGroupEntries.push({
+                binding: 8,
+                resource: this.normalTexture.imageView,
+            });
+        }
+
+        if (this.metallicRoughnessTexture) {
+            layoutEntries.push({ binding: 9, visibility: GPUShaderStage.FRAGMENT, sampler: {} });
+            layoutEntries.push({ binding: 10, visibility: GPUShaderStage.FRAGMENT, texture: {} });
+
+            bindGroupEntries.push({
+                binding: 9,
+                resource: this.metallicRoughnessSampler,
+            });
+            bindGroupEntries.push({
+                binding: 10,
+                resource: this.metallicRoughnessTexture.imageView,
             });
         }
 
@@ -680,6 +759,10 @@ export async function uploadGLBModel(buffer, device) {
     var materials = [];
     for (var i = 0; i < glbJsonData['materials'].length; ++i) {
         materials.push(new GLTFMaterial(glbJsonData['materials'][i], textures));
+    }
+
+    if (glbJsonData['extensionsUsed'] !== undefined) {
+        alert('This model uses glTF extensions, which are not currently supported');
     }
 
     var meshes = [];

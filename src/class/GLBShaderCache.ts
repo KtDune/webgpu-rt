@@ -15,6 +15,18 @@ export class GLBShaderCache {
         if (hasColorTexture) {
             shaderID += "colortex";
         }
+        if (material['emissiveTexture']) {
+            shaderID += "emissivetex";
+        }
+        if (material['occlusionTexture']) {
+            shaderID += "occlusiontex";
+        }
+        if (material['normalTexture']) {
+            shaderID += "normaltex";
+        }
+        if (material.metallicRoughnessTexture) {
+            shaderID += "mrtex";
+        }
         if (!(shaderID in this.shaderCache)) {
             var shaderSource = generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material);
             this.shaderCache[shaderID] = this.device.createShaderModule({ code: shaderSource });
@@ -102,7 +114,37 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
     if (hasColorTexture) {
         fragmentParams += `
             @group(2) @binding(1) var base_color_sampler: sampler;
-            @group(2) @binding(2) var base_color_texture: texture_2d<f32>;`;
+            @group(2) @binding(2) var base_color_texture: texture_2d<f32>;
+        `;
+    }
+
+    if (material['emissiveTexture']) {
+        fragmentParams += `
+        @group(2) @binding(3) var emissive_sampler: sampler;
+        @group(2) @binding(4) var emissive_texture: texture_2d<f32>;
+        `
+    }
+
+    if (material['occlusionTexture']) {
+        fragmentParams += `
+        @group(2) @binding(5) var occlusion_sampler: sampler;
+        @group(2) @binding(6) var occlusion_texture: texture_2d<f32>;
+        `
+    }
+
+    if (material['normalTexture']) {
+        fragmentParams += `
+        @group(2) @binding(7) var normal_sampler: sampler;
+        @group(2) @binding(8) var normal_texture: texture_2d<f32>;
+        `
+    }
+
+    if (material.metallicRoughnessTexture) {
+        fragmentParams += `
+        
+        @group(2) @binding(9) var metallic_roughness_sampler: sampler;
+        @group(2) @binding(10) var metallic_roughness_texture: texture_2d<f32>;
+        `
     }
 
     // PBR FUNCTIONS (complete Cook-Torrance)
@@ -145,6 +187,21 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
             
             return F0 + (max(vec3f(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
         }
+
+        fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
+            let dp1  = dpdx(p);
+            let dp2  = dpdy(p);
+            let duv1 = dpdx(uv);
+            let duv2 = dpdy(uv);
+
+            let dp2perp = cross(dp2, N);
+            let dp1perp = cross(N, dp1);
+            let T = dp2perp * duv1.x + dp1perp * duv2.x;
+            let B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+            let invmax = inverseSqrt(max(dot(T, T), dot(B, B)));
+            return mat3x3<f32>(T * invmax, B * invmax, N);
+        }
     `;
 
     var fragmentStage = fragmentParams + pbrFunctions + `
@@ -159,8 +216,8 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         
         // Material properties
         var albedo = material.base_color_factor.rgb;
-        let metallic = material.metallic_factor;
-        let roughness = material.roughness_factor;
+        var metallic = material.metallic_factor;
+        var roughness = material.roughness_factor;
 
         ${hasUVs && material.metallicRoughnessTexture ? `
             var mrSample = textureSample(metallic_roughness_texture, metallic_roughness_sampler, fin.uv);
@@ -173,9 +230,28 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
             if (texColor.a < 0.001) { discard; }
             albedo *= texColor.rgb;
         ` : ""}
+
+        var ao = 1.0;
+        ${material['occlusionTexture']
+            ?
+            `
+            ao = textureSample(occlusion_texture, occlusion_sampler, fin.uv).r;
+            `
+            : ''
+        }
         
         // Normals & View
         var N = normalize(fin.normal_world);
+        ${
+            material['normalTexture']
+            ? `
+            let normal_sample = textureSample(normal_texture, normal_sampler, fin.uv).rgb;
+            let tangent_normal = normal_sample * 2.0 - 1.0;
+            let TBN = cotangent_frame(N, fin.position_world, fin.uv);
+            N = normalize(TBN * tangent_normal);
+            `
+            : ''
+        }
         let V = normalize(uni.camera_matrix - fin.position_world);
         
         // Light vector
@@ -210,11 +286,18 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         
         let NdotL = max(dot(N, L), 0.0);
         let Lo = (diffuse + specular) * irradiance * NdotL;
+
+        var emissive = vec3f(0);
+        ${material['emissiveTexture']
+            ? ` emissive = textureSample(emissive_texture, emissive_sampler, fin.uv).rgb;
+                emissive *= material.emissive_factor.rgb;`
+            : ''
+        }
         
         // Ambient (IBL approximation)
-        let ambient = vec3f(0.03) * albedo;
+        let ambient = vec3f(0.03) * albedo * ao;
         
-        var color = ambient + Lo;
+        var color = ambient + Lo + emissive;
         
         // Tone mapping + gamma
         color = color / (color + vec3f(1.0));
@@ -236,5 +319,6 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
     `;
 
 
+    // console.log(typeDefs + vertexStage + fragmentStage)
     return typeDefs + vertexStage + fragmentStage;
 }
