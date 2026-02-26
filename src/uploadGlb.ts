@@ -214,7 +214,7 @@ export class GLTFPrimitive {
     buildRenderBundle(
         device, shaderCache, bindGroupLayouts, bundleEncoder, swapChainFormat, depthFormat) {
         var shaderModule = shaderCache.getShader(
-            this.normals, this.texcoords.length > 0, this.material.baseColorTexture);
+            this.normals, this.texcoords.length > 0, this.material.baseColorTexture, this.material);
 
         var vertexBuffers = [{
             arrayStride: this.positions.byteStride,
@@ -237,8 +237,9 @@ export class GLTFPrimitive {
         }
 
         var layout = device.createPipelineLayout({
+            label: 'Pipeline Layout',
             bindGroupLayouts:
-                [bindGroupLayouts[0], bindGroupLayouts[1], this.material.bindGroupLayout],
+                [bindGroupLayouts[0], bindGroupLayouts[1], this.material.bindGroupLayout, bindGroupLayouts[2]],
         });
 
         var vertexStage = {
@@ -270,8 +271,9 @@ export class GLTFPrimitive {
 
         var renderPipeline = device.createRenderPipeline(pipelineDescriptor);
 
-        bundleEncoder.setBindGroup(2, this.material.bindGroup);
         bundleEncoder.setPipeline(renderPipeline);
+        bundleEncoder.setBindGroup(2, this.material.bindGroup);
+        
         bundleEncoder.setVertexBuffer(0,
             this.positions.view.gpuBuffer,
             this.positions.byteOffset,
@@ -326,23 +328,28 @@ export class GLTFNode {
         this.gpuUniforms = buf;
     }
 
-    buildRenderBundle(device,
+    buildRenderBundle(
+        device,
         shaderCache,
         viewParamsLayout,
         viewParamsBindGroup,
+        utilsLayout,
+        utilsBindGroup,
         swapChainFormat,
         depthFormat) {
         var nodeParamsLayout = device.createBindGroupLayout({
+            label: 'Node Params Layout',
             entries:
                 [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }]
         });
 
         this.bindGroup = device.createBindGroup({
+            label: 'Node Params Bind Group',
             layout: nodeParamsLayout,
             entries: [{ binding: 0, resource: { buffer: this.gpuUniforms } }]
         });
 
-        var bindGroupLayouts = [viewParamsLayout, nodeParamsLayout];
+        var bindGroupLayouts = [viewParamsLayout, nodeParamsLayout, utilsLayout];
 
         var bundleEncoder = device.createRenderBundleEncoder({
             colorFormats: [swapChainFormat],
@@ -351,6 +358,7 @@ export class GLTFNode {
 
         bundleEncoder.setBindGroup(0, viewParamsBindGroup);
         bundleEncoder.setBindGroup(1, this.bindGroup);
+        bundleEncoder.setBindGroup(3, utilsBindGroup);
 
         for (var i = 0; i < this.mesh.primitives.length; ++i) {
             this.mesh.primitives[i].buildRenderBundle(device,
@@ -498,9 +506,10 @@ export class GLTFMaterial {
             });
         }
 
-        this.bindGroupLayout = device.createBindGroupLayout({ entries: layoutEntries });
+        this.bindGroupLayout = device.createBindGroupLayout({ label: 'Material Bind Group Layout', entries: layoutEntries });
 
         this.bindGroup = device.createBindGroup({
+            label: 'Material Bind Group',
             layout: this.bindGroupLayout,
             entries: bindGroupEntries,
         });
@@ -564,14 +573,24 @@ export class GLBModel {
     }
 
     buildRenderBundles(
-        device, shaderCache, viewParamsLayout, viewParamsBindGroup, swapChainFormat) {
+        device,
+        shaderCache,
+        viewParamsLayout,
+        viewParamsBindGroup,
+        utilsLayout,
+        utilsBindGroup,
+        swapChainFormat
+    ) {
         var renderBundles = [];
         for (var i = 0; i < this.nodes.length; ++i) {
             var n = this.nodes[i];
-            var bundle = n.buildRenderBundle(device,
+            var bundle = n.buildRenderBundle(
+                device,
                 shaderCache,
                 viewParamsLayout,
                 viewParamsBindGroup,
+                utilsLayout,
+                utilsBindGroup,
                 swapChainFormat,
                 'depth24plus-stencil8');
             renderBundles.push(bundle);

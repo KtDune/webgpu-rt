@@ -47,18 +47,38 @@ import { uploadGLBModel } from "./uploadGlb";
     };
 
     var viewParamsLayout = device.createBindGroupLayout({
+        label: 'View Params Layout',
         entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } }]
     });
 
     var viewParamBuf = device.createBuffer(
         { size: 4 * 4 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     var viewParamsBindGroup = device.createBindGroup(
-        { layout: viewParamsLayout, entries: [{ binding: 0, resource: { buffer: viewParamBuf } }] });
+        { label: 'View Params Bind Group', layout: viewParamsLayout, entries: [{ binding: 0, resource: { buffer: viewParamBuf } }] });
+
+    var utilsLayout = device.createBindGroupLayout({
+        label: 'Utils Layout',
+        entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } }]
+    });
+
+    // camera_matrix: 16 bytes
+    var utilsBuf = device.createBuffer(
+        { size: 4 * 3 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+    var utilsBindGroup = device.createBindGroup(
+        { layout: utilsLayout, entries: [{ binding: 0, resource: { buffer: utilsBuf } }] });
 
     var shaderCache = new GLBShaderCache(device);
 
     var renderBundles = glbFile.buildRenderBundles(
-        device, shaderCache, viewParamsLayout, viewParamsBindGroup, swapChainFormat);
+        device,
+        shaderCache,
+        viewParamsLayout,
+        viewParamsBindGroup,
+        utilsLayout,
+        utilsBindGroup,
+        swapChainFormat
+    );
 
     const defaultEye = vec3.set(vec3.create(), 0.0, 0.0, 1.0);
     const center = vec3.set(vec3.create(), 0.0, 0.0, 0.0);
@@ -107,7 +127,14 @@ import { uploadGLBModel } from "./uploadGlb";
         if (glbBuffer != null) {
             glbFile = await uploadGLBModel(glbBuffer, device);
             renderBundles = glbFile.buildRenderBundles(
-                device, shaderCache, viewParamsLayout, viewParamsBindGroup, swapChainFormat);
+                device,
+                shaderCache,
+                viewParamsLayout,
+                viewParamsBindGroup,
+                utilsLayout,
+                utilsBindGroup,
+                swapChainFormat
+            );
             camera =
                 new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
             glbBuffer = null;
@@ -127,7 +154,16 @@ import { uploadGLBModel } from "./uploadGlb";
         new Float32Array(upload.getMappedRange()).set(projView);
         upload.unmap();
 
+        var cameraBuf = device.createBuffer({
+            size: 4 * 3 * 4,
+            usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
+            mappedAtCreation: true
+        });
+        new Float32Array(cameraBuf.getMappedRange()).set([camera.camera[12], camera.camera[13], camera.camera[14]]);
+        cameraBuf.unmap();
+
         commandEncoder.copyBufferToBuffer(upload, 0, viewParamBuf, 0, 4 * 4 * 4);
+        commandEncoder.copyBufferToBuffer(cameraBuf, 0, utilsBuf, 0, 4 * 3 * 4);
 
         var renderPass = commandEncoder.beginRenderPass(renderPassDesc);
         renderPass.executeBundles(renderBundles);
@@ -144,7 +180,6 @@ import { uploadGLBModel } from "./uploadGlb";
         upload.destroy();
     };
 
-    // *** ADD RESIZE HANDLER (MISSING FROM YOUR CODE) ***
     const resizeCanvas = () => {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
