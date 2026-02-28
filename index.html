@@ -11,17 +11,57 @@
 </head>
 
 <body class="bg-gray-900 text-white overflow-hidden">
+  <!-- Controls Panel -->
+  <div class="absolute top-4 left-4 z-10 bg-black bg-opacity-75 p-6 rounded-lg shadow-xl w-80 space-y-4">
+
+    <!-- PBR Toggle Checkbox -->
+    <div class="flex items-center space-x-3">
+      <input type="checkbox" id="pbr-toggle" checked
+        class="w-5 h-5 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500">
+      <label for="pbr-toggle" class="text-sm font-medium">PBR (uncheck for base color)</label>
+    </div>
+
+    <!-- Light Position Controls -->
+    <div>
+      <h3 class="text-sm font-semibold mb-3 text-gray-300">Light Position</h3>
+
+      <!-- X Position -->
+      <div class="flex items-center space-x-2 mb-2">
+        <label for="light-x" class="text-xs w-12 text-gray-400">X:</label>
+        <input type="range" id="light-x" min="-20" max="20" value="1" step="0.1"
+          class="flex-1 h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600">
+        <span id="light-x-value" class="text-xs text-blue-400 w-12 text-right">0.0</span>
+      </div>
+
+      <!-- Y Position -->
+      <div class="flex items-center space-x-2 mb-2">
+        <label for="light-y" class="text-xs w-12 text-gray-400">Y:</label>
+        <input type="range" id="light-y" min="-20" max="20" value="1" step="0.1"
+          class="flex-1 h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600">
+        <span id="light-y-value" class="text-xs text-blue-400 w-12 text-right">5.0</span>
+      </div>
+
+      <!-- Z Position -->
+      <div class="flex items-center space-x-2">
+        <label for="light-z" class="text-xs w-12 text-gray-400">Z:</label>
+        <input type="range" id="light-z" min="-20" max="20" value="1" step="0.1"
+          class="flex-1 h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600">
+        <span id="light-z-value" class="text-xs text-blue-400 w-12 text-right">10.0</span>
+      </div>
+    </div>
+  </div>
+
   <!-- Upload button -->
-  <div class="absolute top-4 left-4 z-10">
+  <div class="absolute top-4 right-4 z-10">
     <label class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded cursor-pointer">
       Upload GLTF/GLB
-      <input type="file" id="uploadGLB" accept=".glb" class="hidden">
+      <input type="file" id="uploadGLB" accept=".glb,.gltf" class="hidden">
     </label>
   </div>
 
   <!-- FPS Display -->
   <div id="fps"
-    class="absolute top-4 right-4 z-10 bg-black bg-opacity-75 text-white px-4 py-2 rounded text-sm font-mono text-green-400">
+    class="absolute bottom-4 right-4 z-10 bg-black bg-opacity-75 text-white px-4 py-2 rounded text-sm font-mono text-green-400">
     FPS: 0
   </div>
 

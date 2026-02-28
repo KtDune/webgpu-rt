@@ -71,8 +71,10 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         };
 
         struct Uniform {
-            camera_matrix: vec3f
-        }
+            camera_matrix: vec3<f32>,
+            light_pos: vec3<f32>,
+            pbr: f32
+        };
 
         @group(0) @binding(0) var<uniform> view_proj: Mat4Uniform;
         @group(1) @binding(0) var<uniform> node_transform: Mat4Uniform;
@@ -209,8 +211,7 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
     fn fragment_main(fin: VertexOutput) -> @location(0) float4 {
         let PI = 3.1415926;
         
-        // HARDCODED LIGHT
-        let lightPos_world = -uni.camera_matrix;
+        let lightPos_world = uni.light_pos;
         let lightColor = vec3f(1.0, 1.0, 1.0);
         let lightIntensity = 50.0;
         
@@ -239,8 +240,26 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
             `
             : ''
         }
-        
-        // Normals & View
+                var emissive = vec3f(0);
+        ${material['emissiveTexture']
+            ? ` emissive = textureSample(emissive_texture, emissive_sampler, fin.uv).rgb;
+                emissive *= material.emissive_factor.rgb;`
+            : ''
+        }
+
+        if (uni.pbr == 0.0) {
+            let base = albedo * ao + emissive;
+
+            let final_color = vec3f(
+                linear_to_srgb(base.x),
+                linear_to_srgb(base.y),
+                linear_to_srgb(base.z)
+            );
+            
+            return vec4f(final_color, 1.0);
+        }
+
+                // Normals & View
         var N = normalize(fin.normal_world);
         ${
             material['normalTexture']
@@ -252,6 +271,7 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
             `
             : ''
         }
+
         let V = normalize(uni.camera_matrix - fin.position_world);
         
         // Light vector
@@ -286,13 +306,6 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         
         let NdotL = max(dot(N, L), 0.0);
         let Lo = (diffuse + specular) * irradiance * NdotL;
-
-        var emissive = vec3f(0);
-        ${material['emissiveTexture']
-            ? ` emissive = textureSample(emissive_texture, emissive_sampler, fin.uv).rgb;
-                emissive *= material.emissive_factor.rgb;`
-            : ''
-        }
         
         // Ambient (IBL approximation)
         let ambient = vec3f(0.03) * albedo * ao;

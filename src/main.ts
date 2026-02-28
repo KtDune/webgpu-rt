@@ -3,6 +3,7 @@ import { ArcballCamera } from "./class/ArcballCamera";
 import { Controller } from "./class/Controller";
 import { GLBShaderCache } from "./class/GLBShaderCache";
 import { uploadGLBModel } from "./uploadGlb";
+import { WebUI } from "./class/WebUI";
 
 (async () => {
     if (navigator.gpu === undefined) {
@@ -62,8 +63,10 @@ import { uploadGLBModel } from "./uploadGlb";
     });
 
     // camera_matrix: 16 bytes
+    // light position: 16 bytes
+    // pbr: 4 bytes
     var utilsBuf = device.createBuffer(
-        { size: 4 * 3 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        { size: (4 + 4) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     var utilsBindGroup = device.createBindGroup(
         { layout: utilsLayout, entries: [{ binding: 0, resource: { buffer: utilsBuf } }] });
@@ -123,7 +126,11 @@ import { uploadGLBModel } from "./uploadGlb";
     var fpsDisplay = document.getElementById("fps");
     var numFrames = 0;
     var totalTimeMS = 0;
+
+    const webUI = new WebUI();
     const render = async () => {
+        webUI.consumeUpdate();
+
         if (glbBuffer != null) {
             glbFile = await uploadGLBModel(glbBuffer, device);
             renderBundles = glbFile.buildRenderBundles(
@@ -154,18 +161,24 @@ import { uploadGLBModel } from "./uploadGlb";
         new Float32Array(upload.getMappedRange()).set(projView);
         upload.unmap();
 
-        var cameraBuf = device.createBuffer({
-            size: 4 * 3 * 4,
+        const utilsData = new Float32Array(8);
+        utilsData.set([camera.camera[12], camera.camera[13], camera.camera[14]], 0);
+        utilsData.set(webUI.lightPosition, 4);
+        utilsData.set([webUI.usePBR], 7);
+
+        var utilsUploadBuf = device.createBuffer({
+            size: utilsData.byteLength,
             usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
             mappedAtCreation: true
         });
-        new Float32Array(cameraBuf.getMappedRange()).set([camera.camera[12], camera.camera[13], camera.camera[14]]);
-        cameraBuf.unmap();
+        new Float32Array(utilsUploadBuf.getMappedRange()).set(utilsData);
+        utilsUploadBuf.unmap();
 
         commandEncoder.copyBufferToBuffer(upload, 0, viewParamBuf, 0, 4 * 4 * 4);
-        commandEncoder.copyBufferToBuffer(cameraBuf, 0, utilsBuf, 0, 4 * 3 * 4);
+        commandEncoder.copyBufferToBuffer(utilsUploadBuf, 0, utilsBuf, 0, utilsData.byteLength);
 
         var renderPass = commandEncoder.beginRenderPass(renderPassDesc);
+
         renderPass.executeBundles(renderBundles);
 
         renderPass.end();
@@ -199,7 +212,7 @@ import { uploadGLBModel } from "./uploadGlb";
     };
 
     window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();  // *** THIS WAS MISSING - CALL FIRST TIME ***
+    resizeCanvas();
 
     requestAnimationFrame(render);
 })();
