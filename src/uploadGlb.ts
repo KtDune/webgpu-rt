@@ -208,6 +208,7 @@ export class GLTFPrimitive {
         this.texcoords = texcoords;
         this.material = material;
         this.topology = topology;
+        this.doubleSided = material['doubleSided'];
     }
 
     // Build the primitive render commands into the bundle
@@ -250,10 +251,28 @@ export class GLTFPrimitive {
         var fragmentStage = {
             module: shaderModule,
             entryPoint: 'fragment_main',
-            targets: [{ format: swapChainFormat }]
+            targets: [{
+                format: swapChainFormat,
+                blend: {
+                    color: {
+                        srcFactor: 'src-alpha',
+                        dstFactor: 'one-minus-src-alpha',
+                        operation: 'add'
+                    },
+                    alpha: {
+                        srcFactor: 'one',
+                        dstFactor: 'one-minus-src-alpha',
+                        operation: 'add'
+                    }
+                }
+            }]
         };
 
-        var primitive = { topology: 'triangle-list' };
+        var primitive = {
+            topology: 'triangle-list',
+            cullingMode: this.doubleSided ? 'none' : 'back',
+        };
+        console.log(primitive)
         if (this.topology == GLTFRenderMode.TRIANGLE_STRIP) {
             primitive.topology = 'triangle-strip';
             primitive.stripIndexFormat =
@@ -292,10 +311,13 @@ export class GLTFPrimitive {
             var indexFormat = this.indices.componentType == GLTFComponentType.UNSIGNED_SHORT
                 ? 'uint16'
                 : 'uint32';
-            bundleEncoder.setIndexBuffer(this.indices.view.gpuBuffer,
+            bundleEncoder.setIndexBuffer(
+                this.indices.view.gpuBuffer,
                 indexFormat,
                 this.indices.byteOffset,
-                this.indices.length);
+                gltfTypeSize(this.indices.componentType, this.indices.gltfType) * this.indices.count
+            );
+
             bundleEncoder.drawIndexed(this.indices.count);
         } else {
             bundleEncoder.draw(this.positions.count);
@@ -437,6 +459,9 @@ function makeGLTFSingleLevel(nodes) {
 
 export class GLTFMaterial {
     constructor(material, textures) {
+        // In GLTFMaterial constructor
+        this.alphaMode = material['alphaMode'] || 'OPAQUE';
+        this.alphaCutoff = null;
         this.baseColorFactor = [1, 1, 1, 1];
         this.baseColorTexture = null;
         this.emissiveFactor = [0, 0, 0, 1];
@@ -450,6 +475,7 @@ export class GLTFMaterial {
         this.metallicRoughnessSampler = null
         this.normalTexture = null
         this.normalSampler = null
+        this.doubleSided = material['doubleSided'] || false;
 
         if (material['pbrMetallicRoughness'] !== undefined) {
             var pbr = material['pbrMetallicRoughness'];
@@ -487,6 +513,9 @@ export class GLTFMaterial {
         if (material['normalTexture'] !== undefined) {
             this.normalTexture = textures[material['normalTexture']['index']];
             this.normalSampler = this.normalTexture.sampler;
+        }
+        if (material['alphaMode'] === 'MASK') {
+            this.alphaCutoff = material['alphaCutoff'];
         }
 
         this.gpuBuffer = null;
@@ -583,6 +612,22 @@ export class GLTFMaterial {
                 binding: 10,
                 resource: this.metallicRoughnessTexture.imageView,
             });
+        }
+        if (this.alphaMode === 'MASK') {
+            layoutEntries.push({ binding: 11, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } });
+            bindGroupEntries.push({
+                binding: 11,
+                resource: {
+                    buffer: device.createBuffer({
+                        size: 4,
+                        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                        mappedAtCreation: true,
+                    }),
+                },
+            });
+            new Float32Array(bindGroupEntries[bindGroupEntries.length - 1].resource.buffer.getMappedRange()).set(
+                [this.alphaCutoff]);
+            bindGroupEntries[bindGroupEntries.length - 1].resource.buffer.unmap();
         }
 
         this.bindGroupLayout = device.createBindGroupLayout({ label: 'Material Bind Group Layout', entries: layoutEntries });

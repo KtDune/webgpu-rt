@@ -27,6 +27,11 @@ export class GLBShaderCache {
         if (material.metallicRoughnessTexture) {
             shaderID += "mrtex";
         }
+        if (material.alphaMode === 'MASK') {
+            shaderID += "alphamask";
+        } else if (material.alphaMode === 'BLEND') {
+            shaderID += "alphablend";
+        }
         if (!(shaderID in this.shaderCache)) {
             var shaderSource = generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material);
             this.shaderCache[shaderID] = this.device.createShaderModule({ code: shaderSource });
@@ -149,6 +154,12 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         `
     }
 
+    if (material.alphaMode === 'MASK') {
+        fragmentParams += `
+        @group(2) @binding(11) var<uniform> alpha_cutoff: f32;
+        `
+    }
+
     // PBR FUNCTIONS (complete Cook-Torrance)
     var pbrFunctions = `
         fn distributionGGX(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
@@ -217,19 +228,15 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         
         // Material properties
         var albedo = material.base_color_factor.rgb;
-        var metallic = material.metallic_factor;
-        var roughness = material.roughness_factor;
-
-        ${hasUVs && material.metallicRoughnessTexture ? `
-            var mrSample = textureSample(metallic_roughness_texture, metallic_roughness_sampler, fin.uv);
-            metallic *= mrSample.b;  // glTF: B=metallic
-            roughness *= mrSample.g; // glTF: G=roughness
-        ` : ''}
         
         ${hasUVs && hasColorTexture ? `
             let texColor = textureSample(base_color_texture, base_color_sampler, fin.uv);
-            if (texColor.a < 0.001) { discard; }
+            let alpha = texColor.a * material.base_color_factor.a;
             albedo *= texColor.rgb;
+
+            ${material['alphaMode'] === 'MASK' ? `
+                if (alpha < alpha_cutoff) { discard; }
+            ` : ''}
         ` : ""}
 
         var ao = 1.0;
@@ -240,7 +247,8 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
             `
             : ''
         }
-                var emissive = vec3f(0);
+
+        var emissive = vec3f(0);
         ${material['emissiveTexture']
             ? ` emissive = textureSample(emissive_texture, emissive_sampler, fin.uv).rgb;
                 emissive *= material.emissive_factor.rgb;`
@@ -256,13 +264,21 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
                 linear_to_srgb(base.z)
             );
             
-            return vec4f(final_color, 1.0);
+            return vec4f(final_color, material.base_color_factor.a);
         }
 
-                // Normals & View
+        var metallic = material.metallic_factor;
+        var roughness = material.roughness_factor;
+
+        ${hasUVs && material.metallicRoughnessTexture ? `
+            var mrSample = textureSample(metallic_roughness_texture, metallic_roughness_sampler, fin.uv);
+            metallic *= mrSample.b;  // glTF: B=metallic
+            roughness *= mrSample.g; // glTF: G=roughness
+        ` : ''}
+
+        // Normals & View
         var N = normalize(fin.normal_world);
-        ${
-            material['normalTexture']
+        ${material['normalTexture']
             ? `
             let normal_sample = textureSample(normal_texture, normal_sampler, fin.uv).rgb;
             let tangent_normal = normal_sample * 2.0 - 1.0;
@@ -319,8 +335,12 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
             linear_to_srgb(color.y),
             linear_to_srgb(color.z)
         );
-        
-        return float4(color, 1.0);
+
+        ${material['alphaMode'] === 'BLEND' ? `
+                return vec4f(color, alpha);
+            ` : `
+                return vec4f(color, 1.0);
+    `}
     }
     
     fn linear_to_srgb(x: f32) -> f32 {
