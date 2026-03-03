@@ -58,51 +58,6 @@ function gltfTypeNumComponents(type) {
     }
 }
 
-function gltfTypeToWebGPU(componentType, type) {
-    var typeStr = null;
-    switch (componentType) {
-        case GLTFComponentType.BYTE:
-            typeStr = 'char';
-            break;
-        case GLTFComponentType.UNSIGNED_BYTE:
-            typeStr = 'uchar';
-            break;
-        case GLTFComponentType.SHORT:
-            typeStr = 'short';
-            break;
-        case GLTFComponentType.UNSIGNED_SHORT:
-            typeStr = 'ushort';
-            break;
-        case GLTFComponentType.INT:
-            typeStr = 'int';
-            break;
-        case GLTFComponentType.UNSIGNED_INT:
-            typeStr = 'uint';
-            break;
-        case GLTFComponentType.FLOAT:
-            typeStr = 'float';
-            break;
-        case GLTFComponentType.DOUBLE:
-            typeStr = 'double';
-            break;
-        default:
-            alert('Unrecognized GLTF Component Type?');
-    }
-
-    switch (gltfTypeNumComponents(type)) {
-        case 1:
-            return typeStr;
-        case 2:
-            return typeStr + '2';
-        case 3:
-            return typeStr + '3';
-        case 4:
-            return typeStr + '4';
-        default:
-            alert('Too many components!');
-    }
-}
-
 function gltfTypeSize(componentType, type) {
     var typeSize = 0;
     switch (componentType) {
@@ -136,6 +91,42 @@ function gltfTypeSize(componentType, type) {
     return gltfTypeNumComponents(type) * typeSize;
 }
 
+export class Triangle {
+    private _positions: Float32Array[];
+    private _normals: Float32Array[];
+    private _color: Float32Array;
+    private _centroid: Float32Array;
+
+    constructor(positions: Float32Array[], normals: Float32Array[], color: Float32Array) {
+        this._positions = positions;
+        this._normals = normals;
+        this._color = color || [1, 0, 0];
+        this._centroid = new Float32Array([0, 0, 0]);
+        const weights = [0.3333333333333333, 0.3333333333333333, 0.3333333333333333];
+        for (const position of positions) {
+            this._centroid[0] += position[0] * weights[0];
+            this._centroid[1] += position[1] * weights[1];
+            this._centroid[2] += position[2] * weights[2];
+        }
+    }
+
+    get positions(): Float32Array[] {
+        return this._positions;
+    }
+
+    get color(): Float32Array {
+        return this._color;
+    }
+
+    get centroid(): Float32Array {
+        return this._centroid;
+    }
+
+    get normals(): Float32Array[] {
+        return this._normals;
+    }
+}
+
 export class GLTFBuffer {
     constructor(buffer, size, offset) {
         this.arrayBuffer = buffer;
@@ -160,6 +151,10 @@ export class GLTFBufferView {
         this.needsUpload = false;
         this.gpuBuffer = null;
         this.usage = 0;
+    }
+
+    get elements(): Uint8Array {
+        return this.buffer;
     }
 
     addUsage(usage) {
@@ -198,17 +193,23 @@ export class GLTFAccessor {
         var elementSize = gltfTypeSize(this.componentType, this.gltfType);
         return Math.max(elementSize, this.view.byteStride);
     }
+
+    get elements(): Uint8Array {
+        return this.view.elements.slice(this.byteOffset, this.byteOffset + this.byteLength);
+    }
 }
 
 export class GLTFPrimitive {
-    constructor(indices, positions, normals, texcoords, material, topology) {
+    constructor(indices, positions, normals, texcoords, material, topology, triangles) {
         this.indices = indices;
         this.positions = positions;
         this.normals = normals;
         this.texcoords = texcoords;
         this.material = material;
+        this.triangles = triangles;
         this.topology = topology;
         this.doubleSided = material['doubleSided'];
+        this.alphaMode = material['alphaMode'];
     }
 
     // Build the primitive render commands into the bundle
@@ -253,18 +254,11 @@ export class GLTFPrimitive {
             entryPoint: 'fragment_main',
             targets: [{
                 format: swapChainFormat,
-                blend: {
-                    color: {
-                        srcFactor: 'src-alpha',
-                        dstFactor: 'one-minus-src-alpha',
-                        operation: 'add'
-                    },
-                    alpha: {
-                        srcFactor: 'one',
-                        dstFactor: 'one-minus-src-alpha',
-                        operation: 'add'
-                    }
-                }
+                blend: this.alphaMode === 'BLEND' ? {
+                    color: { operation: 'add', srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+                    alpha: { operation: 'add', srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }
+                } : undefined,
+                writeMask: GPUColorWrite.ALL
             }]
         };
 
@@ -272,7 +266,6 @@ export class GLTFPrimitive {
             topology: 'triangle-list',
             cullingMode: this.doubleSided ? 'none' : 'back',
         };
-        console.log(primitive)
         if (this.topology == GLTFRenderMode.TRIANGLE_STRIP) {
             primitive.topology = 'triangle-strip';
             primitive.stripIndexFormat =
@@ -330,6 +323,10 @@ export class GLTFMesh {
         this.name = name;
         this.primitives = primitives;
     }
+
+    get triangles(): Triangle[] {
+        return this.primitives.flatMap(primitive => primitive.triangles);
+    }
 }
 
 export class GLTFNode {
@@ -340,6 +337,11 @@ export class GLTFNode {
 
         this.gpuUniforms = null;
         this.bindGroup = null;
+    }
+
+    get triangles(): Triangle[] {
+        //TODO transfom the triangles based on node transform (then should definately do on gpu)
+        return this.mesh.triangles;
     }
 
     upload(device) {
@@ -460,7 +462,7 @@ function makeGLTFSingleLevel(nodes) {
 export class GLTFMaterial {
     constructor(material, textures) {
         // In GLTFMaterial constructor
-        this.alphaMode = material['alphaMode'] || 'OPAQUE';
+        this.alphaMode = material['alphaMode'] ?? 'OPAQUE';
         this.alphaCutoff = null;
         this.baseColorFactor = [1, 1, 1, 1];
         this.baseColorTexture = null;
@@ -696,6 +698,10 @@ export class GLBModel {
         this.nodes = nodes;
     }
 
+    get triangles(): Triangle[] {
+        return this.nodes.flatMap(node => node.triangles);
+    }
+
     buildRenderBundles(
         device,
         shaderCache,
@@ -852,6 +858,40 @@ export async function uploadGLBModel(buffer, device) {
                 } else if (attr.startsWith('TEXCOORD')) {
                     texcoords.push(new GLTFAccessor(bufferViews[viewID], accessor));
                 }
+
+            }
+
+            var triangles = []
+            if (indices) {
+                const vertexPositions = new Float32Array(positions.view.buffer);
+                const vertexNormals = new Float32Array(normals.view.buffer);
+                const indicesArray = new Uint16Array(
+                    indices.view.buffer.buffer,
+                    indices.view.byteOffset,
+                    indices.count
+                );
+
+                for (let i = 0; i < indicesArray.length; i += 3) {
+                    const indexOne = indicesArray[i] * 3;
+                    const indexTwo = indicesArray[i + 1] * 3;
+                    const indexThree = indicesArray[i + 2] * 3;
+
+                    const positionOne = [vertexPositions[indexOne], vertexPositions[indexOne + 1], vertexPositions[indexOne + 2]];
+                    const positionTwo = [vertexPositions[indexTwo], vertexPositions[indexTwo + 1], vertexPositions[indexTwo + 2]];
+                    const positionThree = [vertexPositions[indexThree], vertexPositions[indexThree + 1], vertexPositions[indexThree + 2]];
+
+                    const normalOne = [vertexNormals[indexOne], vertexNormals[indexOne + 1], vertexNormals[indexOne + 2]];
+                    const normalTwo = [vertexNormals[indexTwo], vertexNormals[indexTwo + 1], vertexNormals[indexTwo + 2]];
+                    const normalThree = [vertexNormals[indexThree], vertexNormals[indexThree + 1], vertexNormals[indexThree + 2]];
+
+                    const color = [0.0, 0.0, 1.0];
+                    const triangle = new Triangle(
+                        [new Float32Array(positionOne), new Float32Array(positionTwo), new Float32Array(positionThree)],
+                        [new Float32Array(normalOne), new Float32Array(normalTwo), new Float32Array(normalThree)],
+                        new Float32Array(color)
+                    );
+                    triangles.push(triangle);
+                }
             }
 
             var material = null;
@@ -862,7 +902,7 @@ export async function uploadGLBModel(buffer, device) {
             }
 
             var gltfPrim =
-                new GLTFPrimitive(indices, positions, normals, texcoords, material, topology);
+                new GLTFPrimitive(indices, positions, normals, texcoords, material, topology, triangles);
             primitives.push(gltfPrim);
         }
         meshes.push(new GLTFMesh(mesh['name'], primitives));

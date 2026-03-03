@@ -229,13 +229,16 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         // Material properties
         var albedo = material.base_color_factor.rgb;
         
+        var alpha = material.base_color_factor.a;
         ${hasUVs && hasColorTexture ? `
             let texColor = textureSample(base_color_texture, base_color_sampler, fin.uv);
-            let alpha = texColor.a * material.base_color_factor.a;
+            alpha = texColor.a * material.base_color_factor.a;
             albedo *= texColor.rgb;
 
             ${material['alphaMode'] === 'MASK' ? `
-                if (alpha < alpha_cutoff) { discard; }
+            var alphaCutoff = 0.5;
+            alphaCutoff = alpha_cutoff;
+            if (alpha < alphaCutoff) { discard; }
             ` : ''}
         ` : ""}
 
@@ -337,9 +340,9 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         );
 
         ${material['alphaMode'] === 'BLEND' ? `
-                return vec4f(color, alpha);
+            return vec4f(color, alpha);
             ` : `
-                return vec4f(color, 1.0);
+            return vec4f(color, material.base_color_factor.a);
     `}
     }
     

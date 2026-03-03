@@ -14,8 +14,25 @@
   <!-- Controls Panel -->
   <div class="absolute top-4 left-4 z-10 bg-black bg-opacity-75 p-6 rounded-lg shadow-xl w-80 space-y-4">
 
+    <!-- Render Mode -->
+    <div>
+      <h3 class="text-sm font-semibold mb-3 text-gray-300">Render Mode</h3>
+
+      <div class="flex items-center space-x-3 mb-2">
+        <input type="radio" id="mode-raster" name="render-mode" value="raster" checked
+          class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 focus:ring-blue-500">
+        <label for="mode-raster" class="text-sm">Rasterization</label>
+      </div>
+
+      <div class="flex items-center space-x-3">
+        <input type="radio" id="mode-raytrace" name="render-mode" value="raytrace"
+          class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 focus:ring-blue-500">
+        <label for="mode-raytrace" class="text-sm">Ray Tracing</label>
+      </div>
+    </div>
+
     <!-- PBR Toggle Checkbox -->
-    <div class="flex items-center space-x-3">
+    <div id="pbr-container" class="flex items-center space-x-3">
       <input type="checkbox" id="pbr-toggle" checked
         class="w-5 h-5 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500">
       <label for="pbr-toggle" class="text-sm font-medium">PBR (uncheck for base color)</label>
