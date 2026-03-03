@@ -117,7 +117,6 @@ document.addEventListener("DOMContentLoaded", () => {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
 
-        // UPLOAD TRIANGLES
         const trianglesUploadData = new Float32Array(triangles.length * 28);
         for (let i = 0; i < triangles.length; i++) {
             trianglesUploadData.set(triangles[i].positions[0], i * 28);
@@ -242,57 +241,6 @@ document.addEventListener("DOMContentLoaded", () => {
         };
     }
 
-    async function renderRaytrace(
-        commandEncoder: GPUCommandEncoder,
-        context: GPUCanvasContext,
-        camera: ArcballCamera,
-        canvas: HTMLCanvasElement,
-        rt: Awaited<ReturnType<typeof initRaytrace>>
-    ) {
-        const upVec3 = new Float32Array([camera.upDir()[0], camera.upDir()[1], camera.upDir()[2]]);
-        const forwardVec3 = new Float32Array([camera.eyeDir()[0], camera.eyeDir()[1], camera.eyeDir()[2]]);
-        const rightVec3 = vec3.create();
-        vec3.cross(rightVec3, forwardVec3, upVec3);
-        vec3.normalize(rightVec3, rightVec3);
-
-        const sceneParamsUpdateData = new Float32Array(16);
-        sceneParamsUpdateData.set([camera.eyePos()[0], camera.eyePos()[1], camera.eyePos()[2]], 0);
-        sceneParamsUpdateData.set([camera.eyeDir()[0], camera.eyeDir()[1], camera.eyeDir()[2]], 4);
-        sceneParamsUpdateData.set([rightVec3[0], rightVec3[1], rightVec3[2]], 8);
-        sceneParamsUpdateData.set([rt.maxBounces], 11);
-        sceneParamsUpdateData.set([camera.upDir()[0], camera.upDir()[1], camera.upDir()[2]], 12);
-        sceneParamsUpdateData.set([rt.triangleCount], 15);
-
-        const sceneParamsUpdateBuffer = device.createBuffer({
-            size: 16 * Float32Array.BYTES_PER_ELEMENT,
-            usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-        });
-        device.queue.writeBuffer(sceneParamsUpdateBuffer, 0, sceneParamsUpdateData, 0);
-        commandEncoder.copyBufferToBuffer(sceneParamsUpdateBuffer, 0, rt.sceneParamsBuffer, 0, 16 * Float32Array.BYTES_PER_ELEMENT);
-
-        // Compute pass
-        const rayTracerPass = commandEncoder.beginComputePass();
-        rayTracerPass.setPipeline(rt.rayTracingPipeline);
-        rayTracerPass.setBindGroup(0, rt.rayTracingBindGroup);
-        rayTracerPass.dispatchWorkgroups(canvas.width, canvas.height, 1);
-        rayTracerPass.end();
-
-        // Screen pass
-        const textureView = context.getCurrentTexture().createView();
-        const renderPass = commandEncoder.beginRenderPass({
-            colorAttachments: [{
-                view: textureView,
-                clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-                loadOp: "clear",
-                storeOp: "store"
-            }]
-        });
-        renderPass.setPipeline(rt.screenPipeline);
-        renderPass.setBindGroup(0, rt.screenBindGroup);
-        renderPass.draw(6, 1, 0, 0);
-        renderPass.end();
-    }
-
     (async () => {
         if (navigator.gpu === undefined) {
             document.getElementById("webgpu-canvas").setAttribute("style", "display:none;");
@@ -384,11 +332,13 @@ document.addEventListener("DOMContentLoaded", () => {
             var start = performance.now();
             var commandEncoder = device.createCommandEncoder();
 
+            var upload = null;
+            var utilsUploadBuf = null;
             if (!rtMode) {
                 raster.renderPassDesc.colorAttachments[0].view = context.getCurrentTexture().createView();
 
                 projView = mat4.mul(projView, proj, camera.camera);
-                var upload = device.createBuffer({
+                upload = device.createBuffer({
                     size: 4 * 4 * 4,
                     usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
                     mappedAtCreation: true
@@ -401,7 +351,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 utilsData.set(webUI.lightPosition, 4);
                 utilsData.set([webUI.usePBR], 7);
 
-                var utilsUploadBuf = device.createBuffer({
+                utilsUploadBuf = device.createBuffer({
                     size: utilsData.byteLength,
                     usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
                     mappedAtCreation: true
@@ -415,11 +365,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 var renderPass = commandEncoder.beginRenderPass(raster.renderPassDesc);
                 renderPass.executeBundles(raster.renderBundles);
                 renderPass.end();
-
-                device.queue.submit([commandEncoder.finish()]);
-                await device.queue.onSubmittedWorkDone();
-
-                upload.destroy();
             }
             else {
                 const upVec3 = new Float32Array([camera.upDir()[0], camera.upDir()[1], camera.upDir()[2]]);
@@ -464,11 +409,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 renderPass.setBindGroup(0, raytrace.screenBindGroup);
                 renderPass.draw(6, 1, 0, 0);
                 renderPass.end();
-
-                device.queue.submit([commandEncoder.finish()]);
-                await device.queue.onSubmittedWorkDone();
             }
 
+            device.queue.submit([commandEncoder.finish()]);
+            await device.queue.onSubmittedWorkDone();
+
+            if (!rtMode) {
+                upload.destroy();
+                utilsUploadBuf.destroy();
+            }
 
             var end = performance.now();
             numFrames += 1;
