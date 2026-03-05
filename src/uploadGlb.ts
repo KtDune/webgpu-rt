@@ -184,6 +184,7 @@ export class GLTFAccessor {
         this.numScalars = this.count * this.numComponents;
         this.view = view;
         this.byteOffset = 0;
+        this.byteLength = this.count * this.byteStride
         if (accessor['byteOffset'] !== undefined) {
             this.byteOffset = accessor['byteOffset'];
         }
@@ -863,13 +864,10 @@ export async function uploadGLBModel(buffer, device) {
 
             var triangles = []
             if (indices) {
-                const vertexPositions = new Float32Array(positions.view.buffer);
-                const vertexNormals = new Float32Array(normals.view.buffer);
-                const indicesArray = new Uint16Array(
-                    indices.view.buffer.buffer,
-                    indices.view.byteOffset,
-                    indices.count
-                );
+                const vertexPositions = new Float32Array(positions.elements.buffer);
+                const vertexNormals = new Float32Array(normals.elements.buffer);
+                const indicesArray = new Uint16Array(indices.elements.buffer);
+                console.log(normals?.elements)
 
                 for (let i = 0; i < indicesArray.length; i += 3) {
                     const indexOne = indicesArray[i] * 3;
@@ -884,7 +882,7 @@ export async function uploadGLBModel(buffer, device) {
                     const normalTwo = [vertexNormals[indexTwo], vertexNormals[indexTwo + 1], vertexNormals[indexTwo + 2]];
                     const normalThree = [vertexNormals[indexThree], vertexNormals[indexThree + 1], vertexNormals[indexThree + 2]];
 
-                    const color = [0.0, 0.0, 1.0];
+                    const color = [1.0, 0.0, 0.0];
                     const triangle = new Triangle(
                         [new Float32Array(positionOne), new Float32Array(positionTwo), new Float32Array(positionThree)],
                         [new Float32Array(normalOne), new Float32Array(normalTwo), new Float32Array(normalThree)],

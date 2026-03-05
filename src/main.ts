@@ -22,7 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
-    async function initRasterization(device: GPUDevice, glbFile: any, swapChainFormat: string, canvas: HTMLCanvasElement) {
+    async function initRasterization(device: GPUDevice, glbFile: any, swapChainFormat: string, canvas: HTMLCanvasElement, shaderCache: GLBShaderCache) {
         const depthTexture = device.createTexture({
             size: { width: canvas.width, height: canvas.height, depthOrArrayLayers: 1 },
             format: "depth24plus-stencil8",
@@ -62,8 +62,6 @@ document.addEventListener("DOMContentLoaded", () => {
         const utilsBindGroup = device.createBindGroup(
             { layout: utilsLayout, entries: [{ binding: 0, resource: { buffer: utilsBuf } }] });
 
-        const shaderCache = new GLBShaderCache(device);
-
         const renderBundles = glbFile.buildRenderBundles(
             device,
             shaderCache,
@@ -88,7 +86,7 @@ document.addEventListener("DOMContentLoaded", () => {
         };
     }
 
-    async function initRaytrace(device: GPUDevice, glbFile: any, canvas: HTMLCanvasElement) {
+    async function initRaytrace(device: GPUDevice, glbFile: any, canvas: HTMLCanvasElement, shaderCache: GLBShaderCache) {
         const colorBuffer = device.createTexture({
             size: [canvas.width, canvas.height],
             format: "rgba8unorm",
@@ -111,6 +109,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         const triangles: Triangle[] = glbFile.triangles;
+        validateTriangleMesh(triangles)
 
         const trianglesBuffer = device.createBuffer({
             size: 28 * Float32Array.BYTES_PER_ELEMENT * triangles.length,
@@ -163,6 +162,8 @@ document.addEventListener("DOMContentLoaded", () => {
             ]
         });
 
+        const raytracer_kernel = shaderCache.getRayShader()
+
         const rayTracingPipeline = device.createComputePipeline({
             layout: device.createPipelineLayout({
                 bindGroupLayouts: [rayTracingBindGroupLayout]
@@ -196,6 +197,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 { binding: 1, resource: colorBufferView }
             ]
         });
+
+        const screen_shader = shaderCache.getScreenShader()
 
         const screenPipeline = device.createRenderPipeline({
             layout: device.createPipelineLayout({
@@ -263,8 +266,10 @@ document.addEventListener("DOMContentLoaded", () => {
         var swapChainFormat = "bgra8unorm";
         context.configure({ device: device, format: swapChainFormat, usage: GPUTextureUsage.RENDER_ATTACHMENT });
 
-        let raster = await initRasterization(device, glbFile, swapChainFormat, canvas);
-        let raytrace = await initRaytrace(device, glbFile, canvas);
+        const shaderCache = new GLBShaderCache(device);
+
+        let raster = await initRasterization(device, glbFile, swapChainFormat, canvas, shaderCache);
+        let raytrace = await initRaytrace(device, glbFile, canvas, shaderCache);
 
         const defaultEye = vec3.set(vec3.create(), 0.0, 0.0, 1.0);
         const center = vec3.set(vec3.create(), 0.0, 0.0, 0.0);
@@ -451,221 +456,167 @@ document.addEventListener("DOMContentLoaded", () => {
     })();
 });
 
-const screen_shader = `
-@group(0) @binding(0)
-var screen_sampler: sampler;
-@group(0) @binding(1)
-var screen_texture: texture_2d<f32>;
+function validateTriangleMesh(triangles: Triangle[]): boolean {
+    let allPassed = true;
 
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>
-}
+    // ─── Helper Math Functions ───────────────────────────────────────────
+    const subtract = (a: Float32Array, b: Float32Array): Float32Array =>
+        new Float32Array([a[0] - b[0], a[1] - b[1], a[2] - b[2]]);
 
-@vertex
-fn vert_main(@builtin(vertex_index) VertexIndex: u32) -> VertexOutput {
-    var positions = array<vec2<f32>, 6>(
-        vec2(1.0, 1.0),
-        vec2(1.0, -1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(-1.0, 1.0)
-    );
+    const crossProduct = (a: Float32Array, b: Float32Array): Float32Array =>
+        new Float32Array([
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]);
 
-    var texCoords = array<vec2<f32>, 6>(
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(0.0, 0.0)
-    );
+    const magnitude = (v: Float32Array): number =>
+        Math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2);
 
-    var output: VertexOutput;
-    output.position = vec4<f32>(positions[VertexIndex], 0.0, 1.0);
-    output.uv = texCoords[VertexIndex];
-    return output;
-}
+    const normalize = (v: Float32Array): Float32Array => {
+        const mag = magnitude(v);
+        return new Float32Array([v[0] / mag, v[1] / mag, v[2] / mag]);
+    };
 
-@fragment
-fn frag_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(screen_texture, screen_sampler, input.uv);
-}
-`
+    const dot = (a: Float32Array, b: Float32Array): number =>
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
-const raytracer_kernel = `
-@group(0) @binding(0)
-var color_buffer: texture_storage_2d<rgba8unorm, write>;
+    const equals = (a: Float32Array, b: Float32Array): boolean =>
+        a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 
-@group(0) @binding(1)
-var<uniform> scene: SceneData;
+    const edgeKey = (a: Float32Array, b: Float32Array): string => {
+        const ka = Array.from(a).join(',');
+        const kb = Array.from(b).join(',');
+        return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+    };
 
-@group(0) @binding(2)
-var<storage, read> primitives: PrimitiveData;
+    const pass = (msg: string) => console.log(`  ✅ PASS: ${msg}`);
+    const fail = (msg: string) => { console.log(`  ❌ FAIL: ${msg}`); allPassed = false; };
 
-struct PrimitiveData {
-    triangles: array<Triangle>
-}
+    console.log('='.repeat(60));
+    console.log('         TRIANGLE MESH VALIDATION REPORT');
+    console.log('='.repeat(60));
+    console.log(`Total triangles: ${triangles.length}\n`);
 
-struct Triangle {
-    corner_a: vec3<f32>,
-    normal_a: vec3<f32>,
-    corner_b: vec3<f32>,
-    normal_b: vec3<f32>,
-    corner_c: vec3<f32>,
-    normal_c: vec3<f32>,
-    color: vec3<f32>
-}
+    // ─── Check 1: Non-empty list ─────────────────────────────────────────
+    console.log('[Check 1] Non-empty triangle list');
+    if (triangles.length === 0) {
+        fail('Triangle list is empty');
+        return false; // No point continuing
+    } else {
+        pass(`Triangle list has ${triangles.length} triangles`);
+    }
 
-struct Ray {
-    origin: vec3<f32>,
-    direction: vec3<f32>
-}
+    // ─── Check 2: Per-triangle basic validity ────────────────────────────
+    console.log('\n[Check 2] Per-triangle basic validity (positions, normals, degenerate)');
+    let basicFailCount = 0;
+    for (let i = 0; i < triangles.length; i++) {
+        const tri = triangles[i];
+        const [p0, p1, p2] = tri.positions;
 
-struct SceneData {
-    cameraPos: vec3<f32>,
-    cameraForward: vec3<f32>,
-    cameraRight: vec3<f32>,
-    maxBounces: f32,
-    cameraUp: vec3<f32>,
-    trianglesCount: f32
-}
-
-struct RenderState {
-    t: f32,
-    color: vec3<f32>,
-    hit: bool,
-    scatter_direction: vec3<f32>,
-}
-
-@compute @workgroup_size(1,1,1)
-fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
-    let screen_size: vec2<u32> = textureDimensions(color_buffer);
-    let screen_pos: vec2<i32> = vec2(i32(GlobalInvocationID.x), i32(GlobalInvocationID.y));
-
-    let horizontal_coefficient: f32 = (f32(screen_pos.x) - f32(screen_size.x) / 2.0) / f32(screen_size.x);
-    let vertical_coefficient: f32 = (f32(screen_pos.y) - f32(screen_size.y) / 2.0) / f32(screen_size.y);
-    
-    let forwards: vec3<f32> = scene.cameraForward;
-    let right: vec3<f32> = scene.cameraRight;
-    let up: vec3<f32> = scene.cameraUp;
-
-    var ray: Ray = Ray(scene.cameraPos, normalize(forwards + right * horizontal_coefficient + up * vertical_coefficient));
-
-    var pixel_color: vec3<f32> = rayColor(ray);
-
-    textureStore(color_buffer, screen_pos, vec4(pixel_color, 1.0));
-}
-
-fn rayColor(ray: Ray) -> vec3<f32> {
-    var color: vec3<f32> = vec3(1.0, 1.0, 1.0);
-    var result: RenderState;
-   
-    var worldRay: Ray;
-    worldRay.origin = ray.origin;
-    worldRay.direction = ray.direction;
-
-    var bounce: u32 = u32(0);
-    while (bounce < u32(scene.maxBounces)) {
-        // we will bounce a certain number of times
-        result.hit = false;
-        result.t = 1.0e30;
-
-        for (var t: u32 = u32(0); t < u32(scene.trianglesCount); t++) {
-            // find the closest triangle
-            result = hit_triangle(worldRay, primitives.triangles[t], 0.001, result.t, result);
+        if (tri.positions.length !== 3) {
+            fail(`Triangle ${i}: expected 3 positions, got ${tri.positions.length}`);
+            basicFailCount++;
+            continue;
         }
-
-        
-        if (!result.hit) {
-            // if we didn't hit anything we will break
-            break;
-        } else {
-            // if we hit something we will update the ray and accumulated color
-            worldRay.origin = worldRay.origin + result.t * worldRay.direction;
-            worldRay.direction = result.scatter_direction;
-            color *= result.color;
+        if (tri.normals.length !== 3) {
+            fail(`Triangle ${i}: expected 3 normals, got ${tri.normals.length}`);
+            basicFailCount++;
+            continue;
         }
-        bounce++;
+        if (equals(p0, p1) || equals(p1, p2) || equals(p0, p2)) {
+            fail(`Triangle ${i}: has duplicate vertices`);
+            basicFailCount++;
+            continue;
+        }
+        const cross = crossProduct(subtract(p1, p0), subtract(p2, p0));
+        if (magnitude(cross) < 1e-10) {
+            fail(`Triangle ${i}: vertices are collinear (zero area)`);
+            basicFailCount++;
+        }
+    }
+    if (basicFailCount === 0) pass(`All ${triangles.length} triangles have valid positions and normals`);
+
+    // ─── Check 3: Manifold edges ─────────────────────────────────────────
+    console.log('\n[Check 3] Manifold check (each edge shared by exactly 2 triangles)');
+    const edgeCount = new Map<string, number>();
+    for (const tri of triangles) {
+        const [p0, p1, p2] = tri.positions;
+        for (const edge of [edgeKey(p0, p1), edgeKey(p1, p2), edgeKey(p2, p0)]) {
+            edgeCount.set(edge, (edgeCount.get(edge) ?? 0) + 1);
+        }
+    }
+    const boundaryEdges = [...edgeCount.entries()].filter(([, c]) => c === 1);
+    const nonManifoldEdges = [...edgeCount.entries()].filter(([, c]) => c > 2);
+
+    if (boundaryEdges.length > 0) {
+        fail(`Found ${boundaryEdges.length} boundary edge(s) — mesh has holes`);
+    } else {
+        pass('No boundary edges found');
+    }
+    if (nonManifoldEdges.length > 0) {
+        fail(`Found ${nonManifoldEdges.length} non-manifold edge(s) — shared by 3+ triangles`);
+    } else {
+        pass('No non-manifold edges found');
     }
 
-    if (bounce >= u32(scene.maxBounces)) {
-        // if we were still hitting stuff when we are bouncing we will set the color to black (mean we are in a shadow)
-        color = vec3(0.0, 0.0, 0.0);
+    // ─── Check 4: Normal consistency ─────────────────────────────────────
+    console.log('\n[Check 4] Normal consistency (stored normals agree with face normal)');
+    let normalFailCount = 0;
+    for (let i = 0; i < triangles.length; i++) {
+        const tri = triangles[i];
+        const [p0, p1, p2] = tri.positions;
+        const faceNormal = normalize(crossProduct(subtract(p1, p0), subtract(p2, p0)));
+        for (const n of tri.normals) {
+            if (dot(faceNormal, n) < 0) {
+                fail(`Triangle ${i}: stored normal points inward (winding mismatch)`);
+                normalFailCount++;
+                break;
+            }
+        }
+    }
+    if (normalFailCount === 0) pass(`All ${triangles.length} triangles have consistent normals`);
+
+    // ─── Check 5: Connectivity (single component) ─────────────────────────
+    console.log('\n[Check 5] Connectivity (all triangles form one connected component)');
+    const adjacency = new Map<number, Set<number>>();
+    const edgeToTris = new Map<string, number[]>();
+    for (let i = 0; i < triangles.length; i++) {
+        const [p0, p1, p2] = triangles[i].positions;
+        for (const edge of [edgeKey(p0, p1), edgeKey(p1, p2), edgeKey(p2, p0)]) {
+            if (!edgeToTris.has(edge)) edgeToTris.set(edge, []);
+            edgeToTris.get(edge)!.push(i);
+        }
+        adjacency.set(i, new Set());
+    }
+    for (const tris of edgeToTris.values()) {
+        if (tris.length === 2) {
+            adjacency.get(tris[0])!.add(tris[1]);
+            adjacency.get(tris[1])!.add(tris[0]);
+        }
+    }
+    const visited = new Set<number>();
+    const queue = [0];
+    while (queue.length > 0) {
+        const curr = queue.pop()!;
+        if (visited.has(curr)) continue;
+        visited.add(curr);
+        for (const neighbor of adjacency.get(curr)!) queue.push(neighbor);
+    }
+    if (visited.size !== triangles.length) {
+        fail(`Mesh has ${triangles.length - visited.size} disconnected triangle(s)`);
+    } else {
+        pass('All triangles form a single connected component');
     }
 
-    return color;
-}
-
-fn hit_triangle(ray:Ray, triangle: Triangle, tMin: f32, tMax: f32, oldRenderState: RenderState) -> RenderState {
-    // TODO: precompute surface normal and pass in with triangle
-    var edgeAB: vec3<f32> = triangle.corner_b - triangle.corner_a;
-    var edgeAC: vec3<f32> = triangle.corner_c - triangle.corner_a;
-    var surface_normal: vec3<f32> = cross(edgeAB, edgeAC);
-
-    var tri_normal_dot_ray_dir: f32 = dot(surface_normal, ray.direction);
-    var front_face: bool = tri_normal_dot_ray_dir < 0.0;
-    if (!front_face) {
-        // flip normal if ray hits back face
-        // surface_normal = -surface_normal;
-        // tri_normal_dot_ray_dir = -tri_normal_dot_ray_dir;
-        //TODO: if we ever need to send rays through objects (refraction) we cannot simply ignore back faces
-        return oldRenderState;
+    // ─── Final Result ─────────────────────────────────────────────────────
+    console.log('\n' + '='.repeat(60));
+    if (allPassed) {
+        console.log('  🎉 RESULT: All checks passed — mesh is valid!');
+    } else {
+        console.log('  ⚠️  RESULT: Some checks failed — mesh may be invalid.');
     }
+    console.log('='.repeat(60));
 
-    if (tri_normal_dot_ray_dir > -0.00001) {
-        // ray is parallel to triangle
-        return oldRenderState;
-    }
-
-    var d = dot(surface_normal, triangle.corner_a); //TODO this could be in tri data
-    var t = (d - dot(surface_normal, ray.origin)) / tri_normal_dot_ray_dir;
-    if (t < tMin || t > tMax) {
-        return oldRenderState;
-    }
-
-    // cramer's rule to solve for barycentric coordinates
-    // TODO: see if I can make the barycentric coord code more clear
-    var intersection_point: vec3<f32> = ray.origin + t * ray.direction;
-    var plane_intersection_point: vec3<f32> = intersection_point - triangle.corner_a;
-    var w = surface_normal / dot(surface_normal, surface_normal);
-
-    var u = dot(w, cross(plane_intersection_point, edgeAC));
-    if (u < 0.0 || u > 1.0) {
-        return oldRenderState;
-    }
-
-    var v = dot(w, cross(edgeAB, plane_intersection_point));
-    if (v < 0.0 || u + v > 1.0) {
-        return oldRenderState;
-    }
-
-    let random_unit_vector: vec3<f32> = normalize(random_in_unit_sphere());
-    var scatter_direction: vec3<f32> = random_unit_vector + vec3(0.0, 0.0, -1.0);
-    if (length(scatter_direction) < 0.0001) {
-     scatter_direction = vec3(0.0, 0.0, -1.0);
-    }
-
-    var renderState: RenderState;
-    renderState.color = oldRenderState.color;
-    renderState.scatter_direction = normalize(scatter_direction);
-    renderState.t = t;
-    renderState.hit = true;
-    renderState.color = triangle.color;
-
-    return renderState;
-}
-
-fn random_in_unit_sphere() -> vec3<f32> {
-    var random_vector: vec3<f32> = vec3( 2.0 * random(vec2(0.0, 0.0)) - 1.0, 2.0 * random(vec2(1.0, 1.0)) - 1.0, 2.0 * random(vec2(2.0, 2.0)) - 1.0);
-    while (dot(random_vector, random_vector) >= 1.0) {
-        random_vector = vec3( 2.0 * random(vec2(0.0, 0.0)) - 1.0, 2.0 * random(vec2(1.0, 1.0)) - 1.0, 2.0 * random(vec2(2.0, 2.0)) - 1.0);
-    }
-    return random_vector;
-}
-
-fn random(uv: vec2<f32>) -> f32 {
-    return fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453123);
-}
-`
+    return allPassed;
+};
