@@ -92,39 +92,29 @@ function gltfTypeSize(componentType, type) {
 }
 
 export class Triangle {
-    private _positions: Float32Array[];
-    private _normals: Float32Array[];
-    private _color: Float32Array;
+    private _positions: Float32Array[];  // 3 × vec3
+    private _normals: Float32Array[];    // 3 × vec3
+    private _uv: Float32Array[];         // 3 × vec2  ← was Float32Array, should be Float32Array[]
+
     private _centroid: Float32Array;
 
-    constructor(positions: Float32Array[], normals: Float32Array[], color: Float32Array) {
+    constructor(positions: Float32Array[], normals: Float32Array[], uv: Float32Array[]) {
         this._positions = positions;
         this._normals = normals;
-        this._color = color || [1, 0, 0];
+        this._uv = uv;                   // ← now typechecks correctly
         this._centroid = new Float32Array([0, 0, 0]);
-        const weights = [0.3333333333333333, 0.3333333333333333, 0.3333333333333333];
+        const weight = 1 / 3;
         for (const position of positions) {
-            this._centroid[0] += position[0] * weights[0];
-            this._centroid[1] += position[1] * weights[1];
-            this._centroid[2] += position[2] * weights[2];
+            this._centroid[0] += position[0] * weight;
+            this._centroid[1] += position[1] * weight;
+            this._centroid[2] += position[2] * weight;
         }
     }
 
-    get positions(): Float32Array[] {
-        return this._positions;
-    }
-
-    get color(): Float32Array {
-        return this._color;
-    }
-
-    get centroid(): Float32Array {
-        return this._centroid;
-    }
-
-    get normals(): Float32Array[] {
-        return this._normals;
-    }
+    get positions(): Float32Array[] { return this._positions; }
+    get normals(): Float32Array[] { return this._normals; }
+    get uv(): Float32Array[] { return this._uv; }       // ← renamed from color
+    get centroid(): Float32Array { return this._centroid; }
 }
 
 export class GLTFBuffer {
@@ -328,6 +318,10 @@ export class GLTFMesh {
     get triangles(): Triangle[] {
         return this.primitives.flatMap(primitive => primitive.triangles);
     }
+
+    get materials(): GLTFMaterial[] {
+        return this.primitives.flatMap(primitive => primitive.material);
+    }
 }
 
 export class GLTFNode {
@@ -343,6 +337,10 @@ export class GLTFNode {
     get triangles(): Triangle[] {
         //TODO transfom the triangles based on node transform (then should definately do on gpu)
         return this.mesh.triangles;
+    }
+
+    get materials(): GLTFMaterial[] {
+        return this.mesh.materials;
     }
 
     upload(device) {
@@ -703,6 +701,10 @@ export class GLBModel {
         return this.nodes.flatMap(node => node.triangles);
     }
 
+    get materials(): GLTFMaterial[] {
+        return this.nodes.flatMap(node => node.materials);
+    }
+
     buildRenderBundles(
         device,
         shaderCache,
@@ -859,7 +861,6 @@ export async function uploadGLBModel(buffer, device) {
                 } else if (attr.startsWith('TEXCOORD')) {
                     texcoords.push(new GLTFAccessor(bufferViews[viewID], accessor));
                 }
-
             }
 
             var triangles = []
@@ -867,7 +868,11 @@ export async function uploadGLBModel(buffer, device) {
                 const vertexPositions = new Float32Array(positions.elements.buffer);
                 const vertexNormals = new Float32Array(normals.elements.buffer);
                 const indicesArray = new Uint16Array(indices.elements.buffer);
-                console.log(normals?.elements)
+                const vertexUvs = new Float32Array(texcoords[0].elements.buffer);
+
+                if (texcoords.length > 1) {
+                    alert('This model has more than 1 TEXCOORD. Only the first TEXCOORD will be handled for ray tracing.')
+                }
 
                 for (let i = 0; i < indicesArray.length; i += 3) {
                     const indexOne = indicesArray[i] * 3;
@@ -882,11 +887,18 @@ export async function uploadGLBModel(buffer, device) {
                     const normalTwo = [vertexNormals[indexTwo], vertexNormals[indexTwo + 1], vertexNormals[indexTwo + 2]];
                     const normalThree = [vertexNormals[indexThree], vertexNormals[indexThree + 1], vertexNormals[indexThree + 2]];
 
-                    const color = [1.0, 0.0, 0.0];
+                    const vec2IndexOne = indicesArray[i] * 2;
+                    const vec2IndexTwo = indicesArray[i + 1] * 2;
+                    const vec2IndexThree = indicesArray[i + 2] * 2;
+
+                    const uvOne = [vertexUvs[vec2IndexOne], vertexUvs[vec2IndexOne + 1]];
+                    const uvTwo = [vertexUvs[vec2IndexTwo], vertexUvs[vec2IndexTwo + 1]];
+                    const uvThree = [vertexUvs[vec2IndexThree], vertexUvs[vec2IndexThree + 1]];
+
                     const triangle = new Triangle(
                         [new Float32Array(positionOne), new Float32Array(positionTwo), new Float32Array(positionThree)],
                         [new Float32Array(normalOne), new Float32Array(normalTwo), new Float32Array(normalThree)],
-                        new Float32Array(color)
+                        [new Float32Array(uvOne), new Float32Array(uvTwo), new Float32Array(uvThree)]
                     );
                     triangles.push(triangle);
                 }

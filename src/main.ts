@@ -2,7 +2,7 @@ import { vec3, mat4 } from "gl-matrix";
 import { ArcballCamera } from "./class/ArcballCamera";
 import { Controller } from "./class/Controller";
 import { GLBShaderCache } from "./class/GLBShaderCache";
-import { uploadGLBModel } from "./uploadGlb";
+import { GLTFMaterial, uploadGLBModel } from "./uploadGlb";
 import { WebUI } from "./class/WebUI";
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -109,27 +109,40 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         const triangles: Triangle[] = glbFile.triangles;
-        validateTriangleMesh(triangles)
+        const materials: GLTFMaterial[] = glbFile.materials
 
-        const trianglesBuffer = device.createBuffer({
-            size: 28 * Float32Array.BYTES_PER_ELEMENT * triangles.length,
+        // for now assume only one material
+        const material = materials[0];
+        let baseColorTextureView: GPUTextureView;
+        if (material.baseColorTexture) {
+            baseColorTextureView = material.baseColorTexture.imageView!;
+        }
+        else {
+            const solidColorTexture = createSolidColorTexture(device, 1, 0, 0, 1);
+            baseColorTextureView = solidColorTexture.createView();
+        }
+
+        const trianglesBuffer = device?.createBuffer({
+            size: 32 * Float32Array.BYTES_PER_ELEMENT * triangles.length,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
 
-        const trianglesUploadData = new Float32Array(triangles.length * 28);
+        const trianglesUploadData = new Float32Array(triangles.length * 32);
         for (let i = 0; i < triangles.length; i++) {
-            trianglesUploadData.set(triangles[i].positions[0], i * 28);
-            trianglesUploadData.set(triangles[i].normals[0], i * 28 + 4);
-            trianglesUploadData.set(triangles[i].positions[1], i * 28 + 8);
-            trianglesUploadData.set(triangles[i].normals[1], i * 28 + 12);
-            trianglesUploadData.set(triangles[i].positions[2], i * 28 + 16);
-            trianglesUploadData.set(triangles[i].normals[2], i * 28 + 20);
-            trianglesUploadData.set(triangles[i].color, i * 28 + 24);
+            trianglesUploadData.set(triangles[i].positions[0], i * 32);
+            trianglesUploadData.set(triangles[i].normals[0], i * 32 + 4)
+            trianglesUploadData.set(triangles[i].positions[1], i * 32 + 8);
+            trianglesUploadData.set(triangles[i].normals[1], i * 32 + 12);
+            trianglesUploadData.set(triangles[i].positions[2], i * 32 + 16);
+            trianglesUploadData.set(triangles[i].normals[2], i * 32 + 20);
+            trianglesUploadData.set(triangles[i].uv[0], i * 32 + 24);
+            trianglesUploadData.set(triangles[i].uv[1], i * 32 + 26);
+            trianglesUploadData.set(triangles[i].uv[2], i * 32 + 28);
         }
-        device.queue.writeBuffer(trianglesBuffer, 0, trianglesUploadData, 0);
 
-        // RAY TRACING PIPELINE
-        const rayTracingBindGroupLayout = device.createBindGroupLayout({
+        device?.queue.writeBuffer(trianglesBuffer, 0, trianglesUploadData, 0);
+
+        const rayTracingBindGroupLayout = device?.createBindGroupLayout({
             entries: [
                 {
                     binding: 0,
@@ -143,22 +156,34 @@ document.addEventListener("DOMContentLoaded", () => {
                 {
                     binding: 1,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "uniform" },
+                    buffer: { type: 'uniform' },
                 },
                 {
                     binding: 2,
                     visibility: GPUShaderStage.COMPUTE,
-                    buffer: { type: "read-only-storage" },
+                    buffer: { type: 'read-only-storage' },
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {},
+                },
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampler: {},
                 }
             ],
         });
 
-        const rayTracingBindGroup = device.createBindGroup({
+        const rayTracingBindGroup = device?.createBindGroup({
             layout: rayTracingBindGroupLayout,
             entries: [
                 { binding: 0, resource: colorBufferView },
                 { binding: 1, resource: { buffer: sceneParamsBuffer } },
                 { binding: 2, resource: { buffer: trianglesBuffer } },
+                { binding: 3, resource: baseColorTextureView },
+                { binding: 4, resource: sampler },
             ]
         });
 
@@ -456,167 +481,13 @@ document.addEventListener("DOMContentLoaded", () => {
     })();
 });
 
-function validateTriangleMesh(triangles: Triangle[]): boolean {
-    let allPassed = true;
-
-    // ─── Helper Math Functions ───────────────────────────────────────────
-    const subtract = (a: Float32Array, b: Float32Array): Float32Array =>
-        new Float32Array([a[0] - b[0], a[1] - b[1], a[2] - b[2]]);
-
-    const crossProduct = (a: Float32Array, b: Float32Array): Float32Array =>
-        new Float32Array([
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]);
-
-    const magnitude = (v: Float32Array): number =>
-        Math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2);
-
-    const normalize = (v: Float32Array): Float32Array => {
-        const mag = magnitude(v);
-        return new Float32Array([v[0] / mag, v[1] / mag, v[2] / mag]);
-    };
-
-    const dot = (a: Float32Array, b: Float32Array): number =>
-        a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-
-    const equals = (a: Float32Array, b: Float32Array): boolean =>
-        a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
-
-    const edgeKey = (a: Float32Array, b: Float32Array): string => {
-        const ka = Array.from(a).join(',');
-        const kb = Array.from(b).join(',');
-        return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
-    };
-
-    const pass = (msg: string) => console.log(`  ✅ PASS: ${msg}`);
-    const fail = (msg: string) => { console.log(`  ❌ FAIL: ${msg}`); allPassed = false; };
-
-    console.log('='.repeat(60));
-    console.log('         TRIANGLE MESH VALIDATION REPORT');
-    console.log('='.repeat(60));
-    console.log(`Total triangles: ${triangles.length}\n`);
-
-    // ─── Check 1: Non-empty list ─────────────────────────────────────────
-    console.log('[Check 1] Non-empty triangle list');
-    if (triangles.length === 0) {
-        fail('Triangle list is empty');
-        return false; // No point continuing
-    } else {
-        pass(`Triangle list has ${triangles.length} triangles`);
-    }
-
-    // ─── Check 2: Per-triangle basic validity ────────────────────────────
-    console.log('\n[Check 2] Per-triangle basic validity (positions, normals, degenerate)');
-    let basicFailCount = 0;
-    for (let i = 0; i < triangles.length; i++) {
-        const tri = triangles[i];
-        const [p0, p1, p2] = tri.positions;
-
-        if (tri.positions.length !== 3) {
-            fail(`Triangle ${i}: expected 3 positions, got ${tri.positions.length}`);
-            basicFailCount++;
-            continue;
-        }
-        if (tri.normals.length !== 3) {
-            fail(`Triangle ${i}: expected 3 normals, got ${tri.normals.length}`);
-            basicFailCount++;
-            continue;
-        }
-        if (equals(p0, p1) || equals(p1, p2) || equals(p0, p2)) {
-            fail(`Triangle ${i}: has duplicate vertices`);
-            basicFailCount++;
-            continue;
-        }
-        const cross = crossProduct(subtract(p1, p0), subtract(p2, p0));
-        if (magnitude(cross) < 1e-10) {
-            fail(`Triangle ${i}: vertices are collinear (zero area)`);
-            basicFailCount++;
-        }
-    }
-    if (basicFailCount === 0) pass(`All ${triangles.length} triangles have valid positions and normals`);
-
-    // ─── Check 3: Manifold edges ─────────────────────────────────────────
-    console.log('\n[Check 3] Manifold check (each edge shared by exactly 2 triangles)');
-    const edgeCount = new Map<string, number>();
-    for (const tri of triangles) {
-        const [p0, p1, p2] = tri.positions;
-        for (const edge of [edgeKey(p0, p1), edgeKey(p1, p2), edgeKey(p2, p0)]) {
-            edgeCount.set(edge, (edgeCount.get(edge) ?? 0) + 1);
-        }
-    }
-    const boundaryEdges = [...edgeCount.entries()].filter(([, c]) => c === 1);
-    const nonManifoldEdges = [...edgeCount.entries()].filter(([, c]) => c > 2);
-
-    if (boundaryEdges.length > 0) {
-        fail(`Found ${boundaryEdges.length} boundary edge(s) — mesh has holes`);
-    } else {
-        pass('No boundary edges found');
-    }
-    if (nonManifoldEdges.length > 0) {
-        fail(`Found ${nonManifoldEdges.length} non-manifold edge(s) — shared by 3+ triangles`);
-    } else {
-        pass('No non-manifold edges found');
-    }
-
-    // ─── Check 4: Normal consistency ─────────────────────────────────────
-    console.log('\n[Check 4] Normal consistency (stored normals agree with face normal)');
-    let normalFailCount = 0;
-    for (let i = 0; i < triangles.length; i++) {
-        const tri = triangles[i];
-        const [p0, p1, p2] = tri.positions;
-        const faceNormal = normalize(crossProduct(subtract(p1, p0), subtract(p2, p0)));
-        for (const n of tri.normals) {
-            if (dot(faceNormal, n) < 0) {
-                fail(`Triangle ${i}: stored normal points inward (winding mismatch)`);
-                normalFailCount++;
-                break;
-            }
-        }
-    }
-    if (normalFailCount === 0) pass(`All ${triangles.length} triangles have consistent normals`);
-
-    // ─── Check 5: Connectivity (single component) ─────────────────────────
-    console.log('\n[Check 5] Connectivity (all triangles form one connected component)');
-    const adjacency = new Map<number, Set<number>>();
-    const edgeToTris = new Map<string, number[]>();
-    for (let i = 0; i < triangles.length; i++) {
-        const [p0, p1, p2] = triangles[i].positions;
-        for (const edge of [edgeKey(p0, p1), edgeKey(p1, p2), edgeKey(p2, p0)]) {
-            if (!edgeToTris.has(edge)) edgeToTris.set(edge, []);
-            edgeToTris.get(edge)!.push(i);
-        }
-        adjacency.set(i, new Set());
-    }
-    for (const tris of edgeToTris.values()) {
-        if (tris.length === 2) {
-            adjacency.get(tris[0])!.add(tris[1]);
-            adjacency.get(tris[1])!.add(tris[0]);
-        }
-    }
-    const visited = new Set<number>();
-    const queue = [0];
-    while (queue.length > 0) {
-        const curr = queue.pop()!;
-        if (visited.has(curr)) continue;
-        visited.add(curr);
-        for (const neighbor of adjacency.get(curr)!) queue.push(neighbor);
-    }
-    if (visited.size !== triangles.length) {
-        fail(`Mesh has ${triangles.length - visited.size} disconnected triangle(s)`);
-    } else {
-        pass('All triangles form a single connected component');
-    }
-
-    // ─── Final Result ─────────────────────────────────────────────────────
-    console.log('\n' + '='.repeat(60));
-    if (allPassed) {
-        console.log('  🎉 RESULT: All checks passed — mesh is valid!');
-    } else {
-        console.log('  ⚠️  RESULT: Some checks failed — mesh may be invalid.');
-    }
-    console.log('='.repeat(60));
-
-    return allPassed;
-};
+function createSolidColorTexture(device: GPUDevice, r: number, g: number, b: number, a: number) {
+    const data = new Uint8Array([r * 255, g * 255, b * 255, a * 255]);
+    const texture = device.createTexture({
+        size: { width: 1, height: 1 },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+    });
+    device.queue.writeTexture({ texture }, data, {}, { width: 1, height: 1 });
+    return texture;
+}
