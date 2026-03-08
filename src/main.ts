@@ -4,21 +4,32 @@ import { Controller } from "./class/Controller";
 import { GLBShaderCache } from "./class/GLBShaderCache";
 import { GLTFMaterial, uploadGLBModel } from "./uploadGlb";
 import { WebUI } from "./class/WebUI";
+import { BVHTree } from "./class/BVH";
 
 document.addEventListener("DOMContentLoaded", () => {
     const rasterRadio = document.getElementById("mode-raster") as HTMLInputElement;
     const raytraceRadio = document.getElementById("mode-raytrace") as HTMLInputElement;
     var rtMode = false
+    let defaultEye = vec3.set(vec3.create(), 0.0, 0.0, 1.0);
+    const center = vec3.set(vec3.create(), 0.0, 0.0, 0.0);
+    let up = vec3.set(vec3.create(), 0.0, 1.0, 0.0);
+    var camera = null;
 
     rasterRadio.addEventListener("change", () => {
         if (rasterRadio.checked) {
-            rtMode = false
+            rtMode = false;
+            up = vec3.set(vec3.create(), 0.0, 1.0, 0.0);
+            defaultEye = vec3.set(vec3.create(), 0.0, 0.0, 1.0);
+            camera?.reset(defaultEye, center, up);
         }
     });
 
     raytraceRadio.addEventListener("change", () => {
         if (raytraceRadio.checked) {
-            rtMode = true
+            rtMode = true;
+            up = vec3.set(vec3.create(), 0.0, -1.0, 0.0);
+            defaultEye = vec3.set(vec3.create(), 0.0, 0.0, -1.0);
+            camera?.reset(defaultEye, center, up);
         }
     });
 
@@ -98,20 +109,21 @@ document.addEventListener("DOMContentLoaded", () => {
             addressModeU: "repeat",
             addressModeV: "repeat",
             magFilter: "linear",
-            minFilter: "nearest",
+            minFilter: "linear",
             mipmapFilter: "nearest",
             maxAnisotropy: 1
         });
 
         const sceneParamsBuffer = device.createBuffer({
-            size: 16 * Float32Array.BYTES_PER_ELEMENT,
+            size: 20 * Float32Array.BYTES_PER_ELEMENT,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
         const triangles: Triangle[] = glbFile.triangles;
+        const bvhTree = new BVHTree(triangles);
         const materials: GLTFMaterial[] = glbFile.materials
 
-        // for now assume only one material
+        // For now assume only one material
         const material = materials[0];
         let baseColorTextureView: GPUTextureView;
         if (material.baseColorTexture) {
@@ -123,24 +135,41 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         const trianglesBuffer = device?.createBuffer({
-            size: 32 * Float32Array.BYTES_PER_ELEMENT * triangles.length,
+            size: 40 * Float32Array.BYTES_PER_ELEMENT * triangles.length,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
 
-        const trianglesUploadData = new Float32Array(triangles.length * 32);
+        const trianglesUploadData = new Float32Array(triangles.length * 40);
         for (let i = 0; i < triangles.length; i++) {
-            trianglesUploadData.set(triangles[i].positions[0], i * 32);
-            trianglesUploadData.set(triangles[i].normals[0], i * 32 + 4)
-            trianglesUploadData.set(triangles[i].positions[1], i * 32 + 8);
-            trianglesUploadData.set(triangles[i].normals[1], i * 32 + 12);
-            trianglesUploadData.set(triangles[i].positions[2], i * 32 + 16);
-            trianglesUploadData.set(triangles[i].normals[2], i * 32 + 20);
-            trianglesUploadData.set(triangles[i].uv[0], i * 32 + 24);
-            trianglesUploadData.set(triangles[i].uv[1], i * 32 + 26);
-            trianglesUploadData.set(triangles[i].uv[2], i * 32 + 28);
-        }
+            const triangle = triangles[i];
+            const defaultNormal = new Float32Array([0, 0, 1]);  // forward-facing normal, no lighting distortion
+            const defaultUv = new Float32Array([1, 1, 1]);          // zero UVs, no texture sampling effect
 
+            trianglesUploadData.set(triangle.positions[0], i * 40);
+            trianglesUploadData.set(triangle.normals[0] ?? defaultNormal[0], i * 40 + 4);
+            trianglesUploadData.set(triangle.positions[1], i * 40 + 8);
+            trianglesUploadData.set(triangle.normals[1] ?? defaultNormal[1], i * 40 + 12);
+            trianglesUploadData.set(triangle.positions[2], i * 40 + 16);
+            trianglesUploadData.set(triangle.normals[2] ?? defaultNormal[2], i * 40 + 20);
+            trianglesUploadData.set(triangle.uv[0] ?? defaultUv[0], i * 40 + 24);
+            trianglesUploadData.set(triangle.uv[1] ?? defaultUv[1], i * 40 + 26);
+            trianglesUploadData.set(triangle.uv[2] ?? defaultUv[2], i * 40 + 28);
+            trianglesUploadData.set([triangle.ior], i * 40 + 32);
+            trianglesUploadData.set([triangle.metalness], i * 40 + 36);
+        }
         device?.queue.writeBuffer(trianglesBuffer, 0, trianglesUploadData, 0);
+
+        const bvh_nodes_buffer_descriptor: GPUBufferDescriptor = {
+            size: 8 * Float32Array.BYTES_PER_ELEMENT * bvhTree.nodes.length,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        };
+        const bvh_nodes_buffer: GPUBuffer = device.createBuffer(bvh_nodes_buffer_descriptor);
+
+        const triangle_indices_buffer_descriptor: GPUBufferDescriptor = {
+            size: bvhTree.triangles.length * Float32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        };
+        const triangle_indices_buffer: GPUBuffer = device.createBuffer(triangle_indices_buffer_descriptor);
 
         const rayTracingBindGroupLayout = device?.createBindGroupLayout({
             entries: [
@@ -172,10 +201,19 @@ document.addEventListener("DOMContentLoaded", () => {
                     binding: 4,
                     visibility: GPUShaderStage.COMPUTE,
                     sampler: {},
-                }
+                },
+                {
+                    binding: 5,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: "read-only-storage" }
+                },
+                {
+                    binding: 6,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: "read-only-storage" }
+                },
             ],
         });
-
         const rayTracingBindGroup = device?.createBindGroup({
             layout: rayTracingBindGroupLayout,
             entries: [
@@ -184,6 +222,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 { binding: 2, resource: { buffer: trianglesBuffer } },
                 { binding: 3, resource: baseColorTextureView },
                 { binding: 4, resource: sampler },
+                { binding: 5, resource: { buffer: bvh_nodes_buffer } },
+                { binding: 6, resource: { buffer: triangle_indices_buffer } },
             ]
         });
 
@@ -244,15 +284,33 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         // UPLOAD INITIAL SCENE PARAMS
-        const maxBounces = 2;
-        const sceneParamsUploadData = new Float32Array(16);
+        const maxBounces = 20;
+        const sceneParamsUploadData = new Float32Array(18);
         sceneParamsUploadData.set([0, 0, 5], 0);
         sceneParamsUploadData.set([0, 0, 1], 4);
         sceneParamsUploadData.set([-1, 0, 0], 8);
         sceneParamsUploadData.set([maxBounces], 11);
         sceneParamsUploadData.set([0, 1, 0], 12);
         sceneParamsUploadData.set([triangles.length], 15);
+        sceneParamsUploadData.set([canvas.width / canvas.height], 16);
+        sceneParamsUploadData.set([50 * Math.PI / 180.0], 17);
         device.queue.writeBuffer(sceneParamsBuffer, 0, sceneParamsUploadData, 0);
+
+        const triangleIndicesUploadData = new Float32Array(bvhTree.triangleIndices.length);
+        for (let i = 0; i < bvhTree.triangleIndices.length; i++) {
+            triangleIndicesUploadData.set([bvhTree.triangleIndices[i]], i);
+        }
+        device?.queue.writeBuffer(triangle_indices_buffer, 0, triangleIndicesUploadData, 0);
+
+        // UPLOAD BVH NODES
+        const bvhNodesUploadData = new Float32Array(bvhTree.nodesUsed * 8);
+        for (let i = 0; i < bvhTree.nodesUsed; i++) {
+            bvhNodesUploadData.set(bvhTree.nodes[i].minCorner, i * 8);
+            bvhNodesUploadData.set([bvhTree.nodes[i].left], i * 8 + 3);
+            bvhNodesUploadData.set(bvhTree.nodes[i].maxCorner, i * 8 + 4);
+            bvhNodesUploadData.set([bvhTree.nodes[i].primitiveCount], i * 8 + 7);
+        }
+        device?.queue.writeBuffer(bvh_nodes_buffer, 0, bvhNodesUploadData, 0);
 
         return {
             colorBuffer,
@@ -296,10 +354,7 @@ document.addEventListener("DOMContentLoaded", () => {
         let raster = await initRasterization(device, glbFile, swapChainFormat, canvas, shaderCache);
         let raytrace = await initRaytrace(device, glbFile, canvas, shaderCache);
 
-        const defaultEye = vec3.set(vec3.create(), 0.0, 0.0, 1.0);
-        const center = vec3.set(vec3.create(), 0.0, 0.0, 0.0);
-        const up = vec3.set(vec3.create(), 0.0, 1.0, 0.0);
-        var camera = new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
+        camera = new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
         var proj = mat4.perspective(
             mat4.create(), 50 * Math.PI / 180.0, canvas.width / canvas.height, 0.1, 1000);
         var projView = mat4.create();
@@ -357,6 +412,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 );
                 camera = new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
                 glbBuffer = null;
+                raytrace = await initRaytrace(device, glbFile, canvas, shaderCache);
             }
 
             var start = performance.now();
@@ -403,21 +459,23 @@ document.addEventListener("DOMContentLoaded", () => {
                 vec3.cross(rightVec3, forwardVec3, upVec3);
                 vec3.normalize(rightVec3, rightVec3);
 
-                const sceneParamsUpdateData = new Float32Array(16);
+                const sceneParamsUpdateData = new Float32Array(18);
                 sceneParamsUpdateData.set([camera.eyePos()[0], camera.eyePos()[1], camera.eyePos()[2]], 0);
                 sceneParamsUpdateData.set([camera.eyeDir()[0], camera.eyeDir()[1], camera.eyeDir()[2]], 4);
                 sceneParamsUpdateData.set([rightVec3[0], rightVec3[1], rightVec3[2]], 8);
                 sceneParamsUpdateData.set([raytrace.maxBounces], 11);
                 sceneParamsUpdateData.set([camera.upDir()[0], camera.upDir()[1], camera.upDir()[2]], 12);
                 sceneParamsUpdateData.set([raytrace.triangleCount], 15);
+                sceneParamsUpdateData.set([canvas.width / canvas.height], 16);
+                console.log(sceneParamsUpdateData[16])
+                sceneParamsUpdateData.set([50 * Math.PI / 180.0], 17);
 
                 const sceneParamsUpdateBuffer = device.createBuffer({
-                    size: 16 * Float32Array.BYTES_PER_ELEMENT,
+                    size: 18 * Float32Array.BYTES_PER_ELEMENT,
                     usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
                 });
                 device.queue.writeBuffer(sceneParamsUpdateBuffer, 0, sceneParamsUpdateData, 0);
-                commandEncoder.copyBufferToBuffer(sceneParamsUpdateBuffer, 0, raytrace.sceneParamsBuffer, 0, 16 * Float32Array.BYTES_PER_ELEMENT);
-
+                commandEncoder.copyBufferToBuffer(sceneParamsUpdateBuffer, 0, raytrace.sceneParamsBuffer, 0, 18 * Float32Array.BYTES_PER_ELEMENT);
                 // Compute pass
                 const rayTracerPass = commandEncoder.beginComputePass();
                 rayTracerPass.setPipeline(raytrace.rayTracingPipeline);
@@ -445,8 +503,8 @@ document.addEventListener("DOMContentLoaded", () => {
             await device.queue.onSubmittedWorkDone();
 
             if (!rtMode) {
-                upload.destroy();
-                utilsUploadBuf.destroy();
+                upload?.destroy();
+                utilsUploadBuf?.destroy();
             }
 
             var end = performance.now();
@@ -456,7 +514,7 @@ document.addEventListener("DOMContentLoaded", () => {
             requestAnimationFrame(render);
         };
 
-        const resizeCanvas = () => {
+        const resizeCanvas = async () => {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
 
@@ -472,6 +530,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 canvas.width / canvas.height, 0.1, 1000);
             camera = new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
             controller.registerForCanvas(canvas);
+
+            raytrace = await initRaytrace(device, glbFile, canvas, shaderCache);
         };
 
         window.addEventListener('resize', resizeCanvas);
@@ -490,4 +550,8 @@ function createSolidColorTexture(device: GPUDevice, r: number, g: number, b: num
     });
     device.queue.writeTexture({ texture }, data, {}, { width: 1, height: 1 });
     return texture;
+}
+
+function resetCamera(camera, defaultEye, center, up) {
+    camera.reset(defaultEye, center, up)
 }
