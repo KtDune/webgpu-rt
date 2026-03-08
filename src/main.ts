@@ -467,7 +467,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 sceneParamsUpdateData.set([camera.upDir()[0], camera.upDir()[1], camera.upDir()[2]], 12);
                 sceneParamsUpdateData.set([raytrace.triangleCount], 15);
                 sceneParamsUpdateData.set([canvas.width / canvas.height], 16);
-                console.log(sceneParamsUpdateData[16])
                 sceneParamsUpdateData.set([50 * Math.PI / 180.0], 17);
 
                 const sceneParamsUpdateBuffer = device.createBuffer({
@@ -480,7 +479,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 const rayTracerPass = commandEncoder.beginComputePass();
                 rayTracerPass.setPipeline(raytrace.rayTracingPipeline);
                 rayTracerPass.setBindGroup(0, raytrace.rayTracingBindGroup);
-                rayTracerPass.dispatchWorkgroups(canvas.width, canvas.height, 1);
+                rayTracerPass.dispatchWorkgroups(
+                    Math.ceil(canvas.width / 8),
+                    Math.ceil(canvas.height / 8),
+                    1
+                );
                 rayTracerPass.end();
 
                 // Screen pass

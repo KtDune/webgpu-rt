@@ -488,7 +488,7 @@ function generateRayShader() {
             hit: bool,
             scatter_direction: vec3<f32>,
             }
-    @compute @workgroup_size(1,1,1)
+    @compute @workgroup_size(8,8,1)
     fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
         let screen_size: vec2<u32> = textureDimensions(color_buffer);
         let screen_pos: vec2<i32> = vec2(i32(GlobalInvocationID.x), i32(GlobalInvocationID.y));
@@ -556,12 +556,6 @@ function generateRayShader() {
         var node: BVHNode = bvh_nodes.nodes[0];
         var stack: array<BVHNode, 15>;
         var stackLocation: u32 = u32(0);
-
-        // NAIVE BRUTE FORCE TRIANGLES
-        // for (var t: u32 = u32(0); t < u32(scene.trianglesCount); t++) {
-        //     // find the closest triangle
-        //     renderState = hit_triangle(ray, primitives.triangles[t], 0.001, renderState.t, renderState, random_seed);
-        // }
 
         while (true) {
             var objectCount: u32 = u32(node.objectCount);
@@ -759,14 +753,12 @@ function generateRayShader() {
         return scatter_direction;
     }
 
-    fn random_in_unit_sphere(random_seed: vec2<f32>) -> vec3<f32> {
-        var random_vector: vec3<f32> = vec3( 2.0 * random(random_seed) - 1.0, 2.0 * random(random_seed) - 1.0, 2.0 * random(random_seed) - 1.0);
-        var nonce: f32 = 0.0;
-        while (dot(random_vector, random_vector) >= 1.0 && nonce < 100.0) {
-            random_vector = vec3( 2.0 * random(vec2(random_seed.x + nonce, random_seed.y)) - 1.0, 2.0 * random(vec2(random_seed.y + nonce, random_seed.x)) - 1.0, 2.0 * random(vec2(random_seed.x + random_seed.y, nonce)) - 1.0);
-            nonce += 1.0;
-        }
-        return random_vector;
+    fn random_in_unit_sphere(seed: vec2<f32>) -> vec3<f32> {
+        // Spherical coordinates — no loop needed
+        let phi = 2.0 * 3.14159265 * random(seed);
+        let cos_theta = 2.0 * random(vec2(seed.y, seed.x)) - 1.0;
+        let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+        return vec3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
     }
 
     fn random(uv: vec2<f32>) -> f32 {
