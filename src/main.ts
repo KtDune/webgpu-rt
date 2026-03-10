@@ -14,6 +14,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const center = vec3.set(vec3.create(), 0.0, 0.0, 0.0);
     let up = vec3.set(vec3.create(), 0.0, 1.0, 0.0);
     var camera = null;
+    let accumulationTexture: GPUTexture;
+    let frameCount: number = 0;
 
     rasterRadio.addEventListener("change", () => {
         if (rasterRadio.checked) {
@@ -115,7 +117,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         const sceneParamsBuffer = device.createBuffer({
-            size: 20 * Float32Array.BYTES_PER_ELEMENT,
+            size: 24 * Float32Array.BYTES_PER_ELEMENT,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
@@ -285,7 +287,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // UPLOAD INITIAL SCENE PARAMS
         const maxBounces = 20;
-        const sceneParamsUploadData = new Float32Array(18);
+        const sceneParamsUploadData = new Float32Array(24);
         sceneParamsUploadData.set([0, 0, 5], 0);
         sceneParamsUploadData.set([0, 0, 1], 4);
         sceneParamsUploadData.set([-1, 0, 0], 8);
@@ -294,6 +296,7 @@ document.addEventListener("DOMContentLoaded", () => {
         sceneParamsUploadData.set([triangles.length], 15);
         sceneParamsUploadData.set([canvas.width / canvas.height], 16);
         sceneParamsUploadData.set([50 * Math.PI / 180.0], 17);
+        sceneParamsUploadData.set([0, 1, 0], 20);
         device.queue.writeBuffer(sceneParamsBuffer, 0, sceneParamsUploadData, 0);
 
         const triangleIndicesUploadData = new Float32Array(bvhTree.triangleIndices.length);
@@ -459,7 +462,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 vec3.cross(rightVec3, forwardVec3, upVec3);
                 vec3.normalize(rightVec3, rightVec3);
 
-                const sceneParamsUpdateData = new Float32Array(18);
+                const sceneParamsUpdateData = new Float32Array(24);
                 sceneParamsUpdateData.set([camera.eyePos()[0], camera.eyePos()[1], camera.eyePos()[2]], 0);
                 sceneParamsUpdateData.set([camera.eyeDir()[0], camera.eyeDir()[1], camera.eyeDir()[2]], 4);
                 sceneParamsUpdateData.set([rightVec3[0], rightVec3[1], rightVec3[2]], 8);
@@ -468,13 +471,14 @@ document.addEventListener("DOMContentLoaded", () => {
                 sceneParamsUpdateData.set([raytrace.triangleCount], 15);
                 sceneParamsUpdateData.set([canvas.width / canvas.height], 16);
                 sceneParamsUpdateData.set([50 * Math.PI / 180.0], 17);
+                sceneParamsUpdateData.set(webUI.lightPosition, 20);
 
                 const sceneParamsUpdateBuffer = device.createBuffer({
-                    size: 18 * Float32Array.BYTES_PER_ELEMENT,
+                    size: 24 * Float32Array.BYTES_PER_ELEMENT,
                     usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
                 });
                 device.queue.writeBuffer(sceneParamsUpdateBuffer, 0, sceneParamsUpdateData, 0);
-                commandEncoder.copyBufferToBuffer(sceneParamsUpdateBuffer, 0, raytrace.sceneParamsBuffer, 0, 18 * Float32Array.BYTES_PER_ELEMENT);
+                commandEncoder.copyBufferToBuffer(sceneParamsUpdateBuffer, 0, raytrace.sceneParamsBuffer, 0, 24 * Float32Array.BYTES_PER_ELEMENT);
                 // Compute pass
                 const rayTracerPass = commandEncoder.beginComputePass();
                 rayTracerPass.setPipeline(raytrace.rayTracingPipeline);
@@ -557,4 +561,18 @@ function createSolidColorTexture(device: GPUDevice, r: number, g: number, b: num
 
 function resetCamera(camera, defaultEye, center, up) {
     camera.reset(defaultEye, center, up)
+}
+
+
+function createAccumulationTexture(device: GPUDevice, width: number, height: number) {
+    accumulationTexture = device.createTexture({
+        size: { width, height },
+        format: 'rgba32float',      // float precision for accumulation
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
+    });
+}
+
+// Call this whenever camera moves or scene changes
+function resetAccumulation() {
+    frameCount = 0;
 }

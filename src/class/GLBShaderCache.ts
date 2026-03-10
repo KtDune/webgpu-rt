@@ -479,7 +479,8 @@ function generateRayShader() {
             cameraUp: vec3<f32>,
             trianglesCount: f32,
             aspectRatio: f32,
-            fov: f32
+            fov: f32,
+            lightPos: vec3<f32>,
         }
 
         struct RenderState {
@@ -487,7 +488,11 @@ function generateRayShader() {
             color: vec3<f32>,
             hit: bool,
             scatter_direction: vec3<f32>,
-            }
+            normal: vec3<f32>,
+            hit_point: vec3<f32>,
+            metalness: f32,
+            roughness: f32,
+        }
     @compute @workgroup_size(8,8,1)
     fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
         let screen_size: vec2<u32> = textureDimensions(color_buffer);
@@ -531,10 +536,36 @@ function generateRayShader() {
                 // if we didn't hit anything we will break
                 break;
             } else {
-                // if we hit something we will update the ray and accumulated color
-                worldRay.origin = worldRay.origin + result.t * worldRay.direction;
+                let hit_point = worldRay.origin + result.t * worldRay.direction;
+                let view_dir  = normalize(-worldRay.direction);
+
+                // Shadow ray toward point light
+                let to_light     = scene.lightPos - hit_point;
+                let light_dist   = length(to_light);
+                let shadow_ray   = Ray(hit_point + result.normal * 0.001, normalize(to_light));
+                let in_shadow    = shadow_trace(shadow_ray, light_dist);
+
+                // PBR direct lighting (skip if in shadow)
+                var direct = vec3(0.0);
+                if (!in_shadow) {
+                    direct = pbr_point_light(
+                        hit_point,
+                        result.normal,
+                        view_dir,
+                        result.color,       // base color from texture
+                        result.metalness,
+                        result.roughness
+                    );
+                }
+
+                // Ambient fallback so shadowed areas aren't pure black
+                let ambient = result.color * 0.03;
+
+                color *= (direct + ambient);
+
+                // Continue bouncing
+                worldRay.origin    = hit_point;
                 worldRay.direction = result.scatter_direction;
-                color *= result.color;
             }
             bounce++;
         }
@@ -707,11 +738,17 @@ function generateRayShader() {
             base_color = textureSampleLevel(base_color_map, base_color_sampler, uv, 0.0).rgb;
         }
 
+        
+
         var renderState: RenderState;
         renderState.scatter_direction = normalize(scatter_direction);
         renderState.t = t;
         renderState.hit = true;
         renderState.color = base_color;
+        renderState.normal    = normal;
+        renderState.hit_point = intersection_point;
+        renderState.metalness = metalness;
+        renderState.roughness = 1.0 - metalness;
 
         return renderState;
     }
@@ -777,6 +814,84 @@ function generateRayShader() {
             color_gamma.b = sqrt(color.b);
         }
         return color_gamma;
+    }
+
+    fn pbr_point_light(
+        hit_point: vec3<f32>,
+        normal: vec3<f32>,
+        view_dir: vec3<f32>,
+        base_color: vec3<f32>,
+        metalness: f32,
+        roughness: f32
+    ) -> vec3<f32> {
+        let L = normalize(scene.lightPos - hit_point);
+        let H = normalize(L + view_dir);
+        let dist = length(scene.lightPos - hit_point);
+        let attenuation = 1.0 / (dist * dist);
+        let lightColor = vec3(1.0, 1.0, 1.0);
+        let lightIntensity = 50.0;
+        let radiance = lightColor * lightIntensity * attenuation;
+
+        let NdotL = max(dot(normal, L), 0.0);
+        let NdotV = max(dot(normal, view_dir), 0.0);
+        let NdotH = max(dot(normal, H), 0.0);
+        let HdotV = max(dot(H, view_dir), 0.0);
+
+        let F0 = mix(vec3(0.04), base_color, metalness);
+
+        let F = F0 + (1.0 - F0) * pow(1.0 - HdotV, 5.0);
+
+        let a = roughness * roughness;
+        let a2 = a * a;
+        let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+        let NDF = a2 / (3.14159 * denom * denom);
+
+        let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+        let G_V = NdotV / (NdotV * (1.0 - k) + k);
+        let G_L = NdotL / (NdotL * (1.0 - k) + k);
+        let G = G_V * G_L;
+
+        let specular = (NDF * G * F) / max(4.0 * NdotV * NdotL, 0.0001);
+
+        let kD = (1.0 - F) * (1.0 - metalness);
+        let diffuse = kD * base_color / 3.14159;
+
+        return (diffuse + specular) * radiance * NdotL;
+    }
+
+    fn shadow_trace(ray: Ray, max_dist: f32) -> bool {
+        var node: BVHNode = bvh_nodes.nodes[0];
+        var stack: array<BVHNode, 15>;
+        var stackLocation: u32 = 0u;
+        var dummy: RenderState;
+        dummy.hit = false;
+        dummy.t = max_dist;
+
+        while (true) {
+            let objectCount = u32(node.objectCount);
+            let contents = u32(node.leftChild);
+
+            if (objectCount == 0u && node.leftChild > 0.0) {
+                let d1 = hit_aabb(ray, bvh_nodes.nodes[contents]);
+                let d2 = hit_aabb(ray, bvh_nodes.nodes[contents + 1u]);
+                if (min(d1, d2) > max_dist) {
+                    if (stackLocation == 0u) { break; }
+                    stackLocation--; node = stack[stackLocation]; continue;
+                }
+                node = bvh_nodes.nodes[contents];
+                stack[stackLocation] = bvh_nodes.nodes[contents + 1u];
+                stackLocation++;
+            } else {
+                for (var i = 0u; i < objectCount; i++) {
+                    let tri = primitives.triangles[u32(triangle_indices.indices[contents + i])];
+                    let result = hit_triangle(ray, tri, 0.001, max_dist, dummy, vec2(0.0), 0u);
+                    if (result.hit) { return true; }
+                }
+                if (stackLocation == 0u) { break; }
+                stackLocation--; node = stack[stackLocation];
+            }
+        }
+        return false;
     }
     `
     return raytracer_kernel
