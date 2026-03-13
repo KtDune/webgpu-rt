@@ -123,17 +123,72 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const triangles: Triangle[] = glbFile.triangles;
         const bvhTree = new BVHTree(triangles);
-        const materials: GLTFMaterial[] = glbFile.materials
+        const materials: GLTFMaterial[] = glbFile.materials;
 
         // For now assume only one material
         const material = materials[0];
+
+        // --- Base color ---
         let baseColorTextureView: GPUTextureView;
         if (material.baseColorTexture) {
             baseColorTextureView = material.baseColorTexture.imageView!;
-        }
-        else {
+        } else {
             const solidColorTexture = createSolidColorTexture(device, 1, 0, 0, 1);
             baseColorTextureView = solidColorTexture.createView();
+        }
+
+        // --- Normal map ---
+        let normalTextureView: GPUTextureView;
+        let normalSamplerResource: GPUSampler;
+        if (material.normalTexture && material.normalSampler) {
+            normalTextureView = material.normalTexture.imageView!;
+            normalSamplerResource = material.normalSampler;
+        } else {
+            // Flat normal: (0.5, 0.5, 1.0) decodes to (0, 0, 1) in tangent space
+            const flatNormalTexture = createSolidColorTexture(device, 0.5, 0.5, 1.0, 1.0);
+            normalTextureView = flatNormalTexture.createView();
+            normalSamplerResource = sampler;
+        }
+
+        // --- Occlusion map ---
+        // Default: solid white (r=1.0) means fully lit / no occlusion
+        let occlusionTextureView: GPUTextureView;
+        let occlusionSamplerResource: GPUSampler;
+        if (material.occlusionTexture && material.occlusionSampler) {
+            occlusionTextureView = material.occlusionTexture.imageView!;
+            occlusionSamplerResource = material.occlusionSampler;
+        } else {
+            const whiteTexture = createSolidColorTexture(device, 1.0, 1.0, 1.0, 1.0);
+            occlusionTextureView = whiteTexture.createView();
+            occlusionSamplerResource = sampler;
+        }
+
+        // --- Emissive map ---
+        // Default: solid black (0, 0, 0) means no emission
+        let emissiveTextureView: GPUTextureView;
+        let emissiveSamplerResource: GPUSampler;
+        if (material.emissiveTexture && material.emissiveSampler) {
+            emissiveTextureView = material.emissiveTexture.imageView!;
+            emissiveSamplerResource = material.emissiveSampler;
+        } else {
+            const blackTexture = createSolidColorTexture(device, 0.0, 0.0, 0.0, 1.0);
+            emissiveTextureView = blackTexture.createView();
+            emissiveSamplerResource = sampler;
+        }
+
+        // --- Metallic-roughness map ---
+        // glTF ORM packing: g = roughness, b = metalness.
+        // Default: g=1.0 (fully rough), b=0.0 (non-metal) — matches typical dielectric defaults.
+        let metallicRoughnessTextureView: GPUTextureView;
+        let metallicRoughnessSamplerResource: GPUSampler;
+        if (material.metallicRoughnessTexture && material.metallicRoughnessSampler) {
+            metallicRoughnessTextureView = material.metallicRoughnessTexture.imageView!;
+            metallicRoughnessSamplerResource = material.metallicRoughnessSampler;
+        } else {
+            // (r=0, g=1, b=0, a=1): roughness=1.0, metalness=0.0
+            const defaultMRTexture = createSolidColorTexture(device, 0.0, 1.0, 0.0, 1.0);
+            metallicRoughnessTextureView = defaultMRTexture.createView();
+            metallicRoughnessSamplerResource = sampler;
         }
 
         const trianglesBuffer = device?.createBuffer({
@@ -144,8 +199,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const trianglesUploadData = new Float32Array(triangles.length * 40);
         for (let i = 0; i < triangles.length; i++) {
             const triangle = triangles[i];
-            const defaultNormal = new Float32Array([0, 0, 1]);  // forward-facing normal, no lighting distortion
-            const defaultUv = new Float32Array([1, 1, 1]);          // zero UVs, no texture sampling effect
+            const defaultNormal = new Float32Array([0, 0, 1]);
+            const defaultUv = new Float32Array([1, 1, 1]);
 
             trianglesUploadData.set(triangle.positions[0], i * 40);
             trianglesUploadData.set(triangle.normals[0] ?? defaultNormal[0], i * 40 + 4);
@@ -214,8 +269,50 @@ document.addEventListener("DOMContentLoaded", () => {
                     visibility: GPUShaderStage.COMPUTE,
                     buffer: { type: "read-only-storage" }
                 },
+                {
+                    binding: 7,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampler: {}
+                },
+                {
+                    binding: 8,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {}
+                },
+                // --- New bindings ---
+                {
+                    binding: 9,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampler: {}
+                },
+                {
+                    binding: 10,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {}
+                },
+                {
+                    binding: 11,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampler: {}
+                },
+                {
+                    binding: 12,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {}
+                },
+                {
+                    binding: 13,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampler: {}
+                },
+                {
+                    binding: 14,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {}
+                },
             ],
         });
+
         const rayTracingBindGroup = device?.createBindGroup({
             layout: rayTracingBindGroupLayout,
             entries: [
@@ -226,10 +323,19 @@ document.addEventListener("DOMContentLoaded", () => {
                 { binding: 4, resource: sampler },
                 { binding: 5, resource: { buffer: bvh_nodes_buffer } },
                 { binding: 6, resource: { buffer: triangle_indices_buffer } },
+                { binding: 7, resource: normalSamplerResource },
+                { binding: 8, resource: normalTextureView },
+                // --- New entries ---
+                { binding: 9, resource: occlusionSamplerResource },
+                { binding: 10, resource: occlusionTextureView },
+                { binding: 11, resource: emissiveSamplerResource },
+                { binding: 12, resource: emissiveTextureView },
+                { binding: 13, resource: metallicRoughnessSamplerResource },
+                { binding: 14, resource: metallicRoughnessTextureView },
             ]
         });
 
-        const raytracer_kernel = shaderCache.getRayShader()
+        const raytracer_kernel = shaderCache.getRayShader();
 
         const rayTracingPipeline = device.createComputePipeline({
             layout: device.createPipelineLayout({
@@ -265,7 +371,7 @@ document.addEventListener("DOMContentLoaded", () => {
             ]
         });
 
-        const screen_shader = shaderCache.getScreenShader()
+        const screen_shader = shaderCache.getScreenShader();
 
         const screenPipeline = device.createRenderPipeline({
             layout: device.createPipelineLayout({

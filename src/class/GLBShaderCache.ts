@@ -432,6 +432,27 @@ function generateRayShader() {
         var<storage, read> bvh_nodes: BVHTree;
         @group(0) @binding(6)
         var<storage, read> triangle_indices: TriangleIndices;
+        @group(0) @binding(7)
+        var normal_map_sampler: sampler;
+        @group(0) @binding(8)
+        var normal_map: texture_2d<f32>;
+
+        // --- New texture bindings ---
+        @group(0) @binding(9)
+        var occlusion_sampler: sampler;
+        @group(0) @binding(10)
+        var occlusion_map: texture_2d<f32>;
+
+        @group(0) @binding(11)
+        var emissive_sampler: sampler;
+        @group(0) @binding(12)
+        var emissive_map: texture_2d<f32>;
+
+        @group(0) @binding(13)
+        var metallic_roughness_sampler: sampler;
+        @group(0) @binding(14)
+        var metallic_roughness_map: texture_2d<f32>;
+
 
         struct PrimitiveData {
             triangles: array<Triangle>
@@ -448,7 +469,8 @@ function generateRayShader() {
             uv_b: vec2<f32>,
             uv_c: vec2<f32>,
             ior: vec4<f32>,
-            metalness: vec4<f32>
+            metalness: f32,
+            roughness: f32
         }
 
         struct BVHTree {
@@ -486,22 +508,83 @@ function generateRayShader() {
         struct RenderState {
             t: f32,
             color: vec3<f32>,
+            emissive: vec3<f32>,   // NEW: additive emissive contribution
             hit: bool,
             scatter_direction: vec3<f32>,
             normal: vec3<f32>,
             hit_point: vec3<f32>,
             metalness: f32,
             roughness: f32,
+            occlusion: f32,        // NEW: ambient occlusion factor [0..1]
         }
+
+    fn compute_tbn(
+        corner_a: vec3<f32>, corner_b: vec3<f32>, corner_c: vec3<f32>,
+        uv_a: vec2<f32>, uv_b: vec2<f32>, uv_c: vec2<f32>,
+        geo_normal: vec3<f32>
+    ) -> mat3x3<f32> {
+        let edge1 = corner_b - corner_a;
+        let edge2 = corner_c - corner_a;
+        let duv1  = uv_b - uv_a;
+        let duv2  = uv_c - uv_a;
+
+        let f = 1.0 / (duv1.x * duv2.y - duv2.x * duv1.y);
+        let T = normalize(f * (edge1 * duv2.y - edge2 * duv1.y));
+        let B = normalize(f * (edge2 * duv1.x - edge1 * duv2.x));
+
+        let t = normalize(T - dot(T, geo_normal) * geo_normal);
+        let b = normalize(B - dot(B, geo_normal) * geo_normal - dot(B, t) * t);
+
+        return mat3x3<f32>(t, b, geo_normal);
+    }
+
+    fn sample_normal_map(uv: vec2<f32>) -> vec3<f32> {
+        let raw = textureSampleLevel(normal_map, normal_map_sampler, uv, 0.0).rgb;
+        return normalize(raw * 2.0 - vec3(1.0));
+    }
+
+    fn get_shading_normal(
+        geo_normal: vec3<f32>,
+        corner_a: vec3<f32>, corner_b: vec3<f32>, corner_c: vec3<f32>,
+        uv_a: vec2<f32>, uv_b: vec2<f32>, uv_c: vec2<f32>,
+        uv: vec2<f32>
+    ) -> vec3<f32> {
+        let TBN = compute_tbn(corner_a, corner_b, corner_c, uv_a, uv_b, uv_c, geo_normal);
+        let tangent_normal = sample_normal_map(uv);
+        return normalize(TBN * tangent_normal);
+    }
+
+    // --- New texture sampling helpers ---
+
+    // Returns the AO factor from the red channel (1.0 = fully lit, 0.0 = fully occluded)
+    fn sample_occlusion(uv: vec2<f32>) -> f32 {
+        return textureSampleLevel(occlusion_map, occlusion_sampler, uv, 0.0).r;
+    }
+
+    // Returns the linear-space emissive colour. Multiply by an intensity scalar in the
+    // caller if you want artist-controlled strength beyond the texture value itself.
+    fn sample_emissive(uv: vec2<f32>) -> vec3<f32> {
+        return textureSampleLevel(emissive_map, emissive_sampler, uv, 0.0).rgb;
+    }
+
+    // glTF 2.0 occlusion-roughness-metalness (ORM) packing:
+    //   r = occlusion  (ignored here — we have a dedicated AO map)
+    //   g = roughness
+    //   b = metalness
+    // Returns vec2(roughness, metalness).
+    fn sample_metallic_roughness(uv: vec2<f32>) -> vec2<f32> {
+        let orm = textureSampleLevel(metallic_roughness_map, metallic_roughness_sampler, uv, 0.0);
+        return vec2<f32>(orm.g, orm.b); // (roughness, metalness)
+    }
+
     @compute @workgroup_size(8,8,1)
     fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
         let screen_size: vec2<u32> = textureDimensions(color_buffer);
         let screen_pos: vec2<i32> = vec2(i32(GlobalInvocationID.x), i32(GlobalInvocationID.y));
 
-        
         let forwards: vec3<f32> = scene.cameraForward;
-        let right: vec3<f32> = scene.cameraRight;
-        let up: vec3<f32> = scene.cameraUp;
+        let right: vec3<f32>    = scene.cameraRight;
+        let up: vec3<f32>       = scene.cameraUp;
 
         let samples_per_pixel: u32 = u32(2);
         var color: vec3<f32> = vec3(0.0, 0.0, 0.0);
@@ -509,7 +592,7 @@ function generateRayShader() {
             var x_offset: f32 = random(vec2(f32(i) + f32(GlobalInvocationID.x), f32(i) + f32(GlobalInvocationID.y)));
             var y_offset: f32 = random(vec2(f32(i) + f32(GlobalInvocationID.y), f32(i) + f32(GlobalInvocationID.x)));
             let horizontal_coefficient: f32 = (f32(screen_pos.x) + x_offset - f32(screen_size.x) / 2.0) / f32(screen_size.x) * scene.aspectRatio;
-            let vertical_coefficient: f32 = (f32(screen_pos.y) + y_offset - f32(screen_size.y) / 2.0) / f32(screen_size.y);            
+            let vertical_coefficient: f32   = (f32(screen_pos.y) + y_offset - f32(screen_size.y) / 2.0) / f32(screen_size.y);
             var ray: Ray = Ray(scene.cameraPos, normalize(forwards + right * horizontal_coefficient + up * vertical_coefficient));
             color += rayColor(ray, vec2(f32(GlobalInvocationID.x) + f32(i), f32(GlobalInvocationID.y) + f32(i)), i);
         }
@@ -521,49 +604,45 @@ function generateRayShader() {
     fn rayColor(ray: Ray, random_seed: vec2<f32>, sample_number: u32) -> vec3<f32> {
         var result: RenderState;
         var color: vec3<f32> = vec3(1.0, 1.0, 1.0);
-    
+
         var worldRay: Ray;
-        worldRay.origin = ray.origin;
+        worldRay.origin    = ray.origin;
         worldRay.direction = ray.direction;
-        
+
         var bounce: u32 = u32(0);
         while (bounce < u32(scene.maxBounces)) {
-            // we will bounce a certain number of times
             result = trace(worldRay, random_seed, sample_number);
 
-            
             if (!result.hit) {
-                // if we didn't hit anything we will break
                 break;
             } else {
                 let hit_point = worldRay.origin + result.t * worldRay.direction;
                 let view_dir  = normalize(-worldRay.direction);
 
-                // Shadow ray toward point light
-                let to_light     = scene.lightPos - hit_point;
-                let light_dist   = length(to_light);
-                let shadow_ray   = Ray(hit_point + result.normal * 0.001, normalize(to_light));
-                let in_shadow    = shadow_trace(shadow_ray, light_dist);
+                let to_light   = scene.lightPos - hit_point;
+                let light_dist = length(to_light);
+                let shadow_factor = soft_shadow_factor(hit_point, result.normal, random_seed);
 
-                // PBR direct lighting (skip if in shadow)
                 var direct = vec3(0.0);
-                if (!in_shadow) {
+                if (shadow_factor > 0.0) {
                     direct = pbr_point_light(
                         hit_point,
                         result.normal,
                         view_dir,
-                        result.color,       // base color from texture
+                        result.color,
                         result.metalness,
                         result.roughness
                     );
+                    direct *= shadow_factor;
                 }
 
-                // Ambient fallback so shadowed areas aren't pure black
-                let ambient = result.color * 0.03;
+                // Ambient term is modulated by the AO factor sampled in hit_triangle.
+                let ambient = result.color * 0.03 * result.occlusion;
 
+                // Emissive is additive and independent of lighting.
                 color *= (direct + ambient);
+                color += result.emissive;
 
-                // Continue bouncing
                 worldRay.origin    = hit_point;
                 worldRay.direction = result.scatter_direction;
             }
@@ -571,7 +650,6 @@ function generateRayShader() {
         }
 
         if (bounce >= u32(scene.maxBounces)) {
-            // if we were still hitting stuff when we are bouncing we will set the color to black (mean we are in a shadow)
             color = vec3(0.0, 0.0, 0.0);
         }
 
@@ -582,7 +660,7 @@ function generateRayShader() {
         var nearest_hit: f32 = 1.0e30;
         var renderState: RenderState;
         renderState.hit = false;
-        renderState.t = 1.0e30;
+        renderState.t   = 1.0e30;
 
         var node: BVHNode = bvh_nodes.nodes[0];
         var stack: array<BVHNode, 15>;
@@ -590,9 +668,8 @@ function generateRayShader() {
 
         while (true) {
             var objectCount: u32 = u32(node.objectCount);
-            var contents: u32 = u32(node.leftChild);
+            var contents: u32    = u32(node.leftChild);
 
-            // internal node goes and checks children
             if (objectCount == u32(0) && node.leftChild > 0.0) {
                 var child_one: BVHNode = bvh_nodes.nodes[contents];
                 var child_two: BVHNode = bvh_nodes.nodes[contents + u32(1)];
@@ -604,17 +681,15 @@ function generateRayShader() {
                 var farthest_child: BVHNode;
 
                 if (distance_one < distance_two) {
-                    closest_child = child_one;
+                    closest_child  = child_one;
                     farthest_child = child_two;
                 } else {
-                    closest_child = child_two;
+                    closest_child  = child_two;
                     farthest_child = child_one;
                 }
 
-                
                 var closest_distance: f32 = min(distance_one, distance_two);
                 if (closest_distance > nearest_hit) {
-                    // ray misses both children grab next BVH node to explore (or break if stack is empty)
                     if (stackLocation == u32(0)) {
                         break;
                     } else {
@@ -623,19 +698,20 @@ function generateRayShader() {
                         continue;
                     }
                 } else {
-                    // ray hits at least one child, assign exploring child to closest one
                     node = closest_child;
                     var farthest_distance: f32 = max(distance_one, distance_two);
                     if (farthest_distance < nearest_hit) {
-                        // if other node is closer than nearest hit, push it on the stack so we can explore it if needed
                         stack[stackLocation] = farthest_child;
                         stackLocation++;
                     }
                 }
             } else {
-                // actual data node, test triangles
                 for (var i: u32 = u32(0); i < objectCount; i++) {
-                    var newRenderState: RenderState = hit_triangle(ray, primitives.triangles[u32(triangle_indices.indices[contents + i])], 0.001, nearest_hit, renderState, random_seed, sample_number);
+                    var newRenderState: RenderState = hit_triangle(
+                        ray,
+                        primitives.triangles[u32(triangle_indices.indices[contents + i])],
+                        0.001, nearest_hit, renderState, random_seed, sample_number
+                    );
 
                     if (newRenderState.hit) {
                         nearest_hit = newRenderState.t;
@@ -643,7 +719,7 @@ function generateRayShader() {
                     }
                 }
 
-                if (stackLocation == u32(0) ) {
+                if (stackLocation == u32(0)) {
                     break;
                 } else {
                     stackLocation--;
@@ -673,13 +749,17 @@ function generateRayShader() {
         }
     }
 
-    fn hit_triangle(ray:Ray, triangle: Triangle, tMin: f32, tMax: f32, oldRenderState: RenderState, random_seed: vec2<f32>, sample_number: u32) -> RenderState {
-        var ior: f32 = triangle.ior.x;
-        var metalness: f32 = triangle.metalness.x;
-        
-        // TODO: precompute surface normal and pass in with triangle
-        var edgeAB: vec3<f32> = triangle.corner_b - triangle.corner_a;
-        var edgeAC: vec3<f32> = triangle.corner_c - triangle.corner_a;
+    fn hit_triangle(
+        ray: Ray, triangle: Triangle,
+        tMin: f32, tMax: f32,
+        oldRenderState: RenderState,
+        random_seed: vec2<f32>, sample_number: u32
+    ) -> RenderState {
+        var ior: f32       = triangle.ior.x;
+        var metalness: f32 = triangle.metalness;
+
+        var edgeAB: vec3<f32>        = triangle.corner_b - triangle.corner_a;
+        var edgeAC: vec3<f32>        = triangle.corner_c - triangle.corner_a;
         var surface_normal: vec3<f32> = cross(edgeAB, edgeAC);
 
         var use_ior: bool = ior > 0.0 && (sample_number % 2u == 0u);
@@ -695,17 +775,16 @@ function generateRayShader() {
         }
 
         if (tri_normal_dot_ray_dir > -0.00000001) {
-            // ray is parallel to triangle
             return oldRenderState;
         }
 
-        var d = dot(surface_normal, triangle.corner_a); //TODO this could be in tri data
+        var d = dot(surface_normal, triangle.corner_a);
         var t = (d - dot(surface_normal, ray.origin)) / tri_normal_dot_ray_dir;
         if (t < tMin || t > tMax) {
             return oldRenderState;
         }
 
-        var intersection_point: vec3<f32> = ray.origin + t * ray.direction;
+        var intersection_point: vec3<f32>       = ray.origin + t * ray.direction;
         var plane_intersection_point: vec3<f32> = intersection_point - triangle.corner_a;
         var w = surface_normal / dot(surface_normal, surface_normal);
 
@@ -719,44 +798,91 @@ function generateRayShader() {
             return oldRenderState;
         }
 
-        
-        var normal = normalize((1.0 - u - v) * triangle.normal_a + u * triangle.normal_b + v * triangle.normal_c);
+        var geo_normal = normalize((1.0 - u - v) * triangle.normal_a + u * triangle.normal_b + v * triangle.normal_c);
+        var uv = (1.0 - u - v) * triangle.uv_a + u * triangle.uv_b + v * triangle.uv_c;
 
         var scatter_direction: vec3<f32>;
         var base_color: vec3<f32>;
+        var shading_normal: vec3<f32>;
+        var emissive_color: vec3<f32> = vec3(0.0);
+        var ao: f32 = 1.0;
 
         if (use_ior) {
-            scatter_direction = dielectric_scattering(ray, normal, ior, front_face, random_seed);
-            base_color = vec3(1.0, 1.0, 1.0);
+            // Dielectric path: skip texture lookups, keep as-is.
+            shading_normal    = geo_normal;
+            scatter_direction = dielectric_scattering(ray, shading_normal, ior, front_face, random_seed);
+            base_color        = vec3(1.0, 1.0, 1.0);
         } else {
-            if (random(random_seed) < metalness) {
-                scatter_direction = metal_scattering(ray, normal);
+            shading_normal = get_shading_normal(
+                geo_normal,
+                triangle.corner_a, triangle.corner_b, triangle.corner_c,
+                triangle.uv_a, triangle.uv_b, triangle.uv_c,
+                uv
+            );
+
+            // --- Sample the new textures ---
+
+            // Metallic-roughness: glTF ORM packing (g = roughness, b = metalness).
+            // These override the per-triangle scalar values for full texel-level control.
+            let mr       = sample_metallic_roughness(uv);
+            let roughness_tex = mr.x;   // green channel
+            let metalness_tex = mr.y;   // blue channel
+
+            // Ambient occlusion from dedicated AO map (red channel).
+            ao = sample_occlusion(uv);
+
+            // Emissive — scale by a fixed strength multiplier if desired.
+            let emissive_strength: f32 = 1.0;
+            emissive_color = sample_emissive(uv) * emissive_strength;
+
+            // Use texture metalness for scatter decision (overrides per-triangle scalar).
+            if (random(random_seed) < metalness_tex) {
+                scatter_direction = metal_scattering(ray, shading_normal);
             } else {
-                scatter_direction = lambertian_scattering(normal, random_seed);
+                scatter_direction = lambertian_scattering(shading_normal, random_seed);
             }
-            var uv = (1.0 - u - v) * triangle.uv_a + u * triangle.uv_b + v * triangle.uv_c;
+
             base_color = textureSampleLevel(base_color_map, base_color_sampler, uv, 0.0).rgb;
+
+            // Write back resolved PBR values into local variables so RenderState below
+            // captures the texture-sourced values, not the stale triangle scalars.
+            metalness = metalness_tex;
+            // roughness is kept separately — reuse the variable name below.
+            var roughness_resolved: f32 = roughness_tex;
+
+            var renderState: RenderState;
+            renderState.scatter_direction = normalize(scatter_direction);
+            renderState.t         = t;
+            renderState.hit       = true;
+            renderState.color     = base_color;
+            renderState.emissive  = emissive_color;
+            renderState.normal    = shading_normal;
+            renderState.hit_point = intersection_point;
+            renderState.metalness = metalness;
+            renderState.roughness = roughness_resolved;
+            renderState.occlusion = ao;
+            return renderState;
         }
 
-        
-
+        // Dielectric exit path (use_ior == true).
         var renderState: RenderState;
         renderState.scatter_direction = normalize(scatter_direction);
-        renderState.t = t;
-        renderState.hit = true;
-        renderState.color = base_color;
-        renderState.normal    = normal;
+        renderState.t         = t;
+        renderState.hit       = true;
+        renderState.color     = base_color;
+        renderState.emissive  = vec3(0.0);   // dielectrics don't emit
+        renderState.normal    = shading_normal;
         renderState.hit_point = intersection_point;
-        renderState.metalness = metalness;
-        renderState.roughness = 1.0 - metalness;
-
+        renderState.metalness = triangle.metalness;
+        renderState.roughness = triangle.roughness;
+        renderState.occlusion = 1.0;         // no AO on glass
         return renderState;
     }
 
     fn lambertian_scattering(normal: vec3<f32>, random_seed: vec2<f32>) -> vec3<f32> {
-    let random_unit_vector: vec3<f32> = random_in_unit_sphere(vec2(normal.x + random_seed.x, normal.y + random_seed.y));
-    var scatter_direction: vec3<f32> = random_unit_vector + normal;
-    return scatter_direction;
+        let random_unit_vector: vec3<f32> = random_in_unit_sphere(vec2(normal.x + random_seed.x, normal.y + random_seed.y));
+        var scatter_direction: vec3<f32>  = random_unit_vector + normal;
+        return scatter_direction;
     }
 
     fn metal_scattering(ray: Ray, normal: vec3<f32>) -> vec3<f32> {
@@ -773,7 +899,7 @@ function generateRayShader() {
         var cos_theta = min(dot(-unit_direction, normal), 1.0);
         var sin_theta = sqrt(1.0 - cos_theta * cos_theta);
         var cannot_refract = refrecation_ratio * sin_theta > 1.0;
-        
+
         var scatter_direction: vec3<f32>;
         if (cannot_refract) {
             var r0 = (1.0 - refrecation_ratio) / (1.0 + refrecation_ratio);
@@ -791,8 +917,7 @@ function generateRayShader() {
     }
 
     fn random_in_unit_sphere(seed: vec2<f32>) -> vec3<f32> {
-        // Spherical coordinates — no loop needed
-        let phi = 2.0 * 3.14159265 * random(seed);
+        let phi       = 2.0 * 3.14159265 * random(seed);
         let cos_theta = 2.0 * random(vec2(seed.y, seed.x)) - 1.0;
         let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
         return vec3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
@@ -804,15 +929,9 @@ function generateRayShader() {
 
     fn linear_to_gamma(color: vec3<f32>) -> vec3<f32> {
         var color_gamma: vec3<f32> = vec3(0.0, 0.0, 0.0);
-        if (color.r > 0.0) {
-            color_gamma.r = sqrt(color.r);
-        }
-        if (color.g > 0.0) {
-            color_gamma.g = sqrt(color.g);
-        }
-        if (color.b > 0.0) {
-            color_gamma.b = sqrt(color.b);
-        }
+        if (color.r > 0.0) { color_gamma.r = sqrt(color.r); }
+        if (color.g > 0.0) { color_gamma.g = sqrt(color.g); }
+        if (color.b > 0.0) { color_gamma.b = sqrt(color.b); }
         return color_gamma;
     }
 
@@ -826,37 +945,57 @@ function generateRayShader() {
     ) -> vec3<f32> {
         let L = normalize(scene.lightPos - hit_point);
         let H = normalize(L + view_dir);
-        let dist = length(scene.lightPos - hit_point);
+        let dist        = length(scene.lightPos - hit_point);
         let attenuation = 1.0 / (dist * dist);
-        let lightColor = vec3(1.0, 1.0, 1.0);
-        let lightIntensity = 50.0;
-        let radiance = lightColor * lightIntensity * attenuation;
+        let radiance    = vec3(1.0, 1.0, 1.0) * 50.0 * attenuation;
 
         let NdotL = max(dot(normal, L), 0.0);
         let NdotV = max(dot(normal, view_dir), 0.0);
-        let NdotH = max(dot(normal, H), 0.0);
         let HdotV = max(dot(H, view_dir), 0.0);
 
+        if (NdotL <= 0.0) {
+            return vec3(0.0);
+        }
+
         let F0 = mix(vec3(0.04), base_color, metalness);
-
-        let F = F0 + (1.0 - F0) * pow(1.0 - HdotV, 5.0);
-
-        let a = roughness * roughness;
-        let a2 = a * a;
-        let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
-        let NDF = a2 / (3.14159 * denom * denom);
-
-        let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
-        let G_V = NdotV / (NdotV * (1.0 - k) + k);
-        let G_L = NdotL / (NdotL * (1.0 - k) + k);
-        let G = G_V * G_L;
+        let F   = fresnelSchlick(HdotV, F0);
+        let NDF = distributionGGX(normal, H, roughness);
+        let G   = geometrySmith(normal, view_dir, L, roughness);
 
         let specular = (NDF * G * F) / max(4.0 * NdotV * NdotL, 0.0001);
 
-        let kD = (1.0 - F) * (1.0 - metalness);
-        let diffuse = kD * base_color / 3.14159;
+        let kD      = (1.0 - F) * (1.0 - metalness);
+        let diffuse = kD * base_color / 3.14159265;
 
         return (diffuse + specular) * radiance * NdotL;
+    }
+
+    fn soft_shadow_factor(hit_point: vec3<f32>, normal: vec3<f32>, random_seed: vec2<f32>) -> f32 {
+        let light_radius = 2.0;        // controls penumbra size
+        let num_samples  = 4u;
+        var lit_samples  = 0.0;
+
+        for (var i = 0u; i < num_samples; i++) {
+            // random offset on a disc perpendicular to the light direction
+            let seed1 = vec2(random_seed.x + f32(i) * 0.1, random_seed.y + f32(i) * 0.3);
+            let seed2 = vec2(random_seed.y + f32(i) * 0.7, random_seed.x + f32(i) * 0.5);
+
+            let offset = vec3(
+                (random(seed1) * 2.0 - 1.0) * light_radius,
+                (random(seed2) * 2.0 - 1.0) * light_radius,
+                0.0
+            );
+
+            let sample_pos  = scene.lightPos + offset;
+            let to_sample   = sample_pos - hit_point;
+            let shadow_ray  = Ray(hit_point + normal * 0.001, normalize(to_sample));
+
+            if (!shadow_trace(shadow_ray, length(to_sample))) {
+                lit_samples += 1.0;
+            }
+        }
+
+        return lit_samples / f32(num_samples);  // 0.0 = fully shadowed, 1.0 = fully lit
     }
 
     fn shadow_trace(ray: Ray, max_dist: f32) -> bool {
@@ -892,6 +1031,42 @@ function generateRayShader() {
             }
         }
         return false;
+    }
+
+    fn distributionGGX(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
+        let square_roughness = roughness * roughness;
+        let NdotH            = max(dot(N, H), 0.0);
+        let square_NdotH     = NdotH * NdotH;
+
+        let denom_inner = square_NdotH * (square_roughness - 1.0) + 1.0;
+        let denom       = 3.1415926 * denom_inner * denom_inner;
+
+        return square_roughness / denom;
+    }
+
+    fn geometrySchlickGGX(NdotV: f32, roughness: f32) -> f32 {
+        let r    = roughness + 1.0;
+        let k    = (1 + (r * r)) / 8.0;
+        let nom  = NdotV;
+        let denom = NdotV * (1.0 - k) + k;
+        return nom / denom;
+    }
+
+    fn geometrySmith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f32 {
+        let NdotV = max(dot(N, V), 0.0);
+        let NdotL = max(dot(N, L), 0.0);
+        let ggx2  = geometrySchlickGGX(NdotV, roughness);
+        let ggx1  = geometrySchlickGGX(NdotL, roughness);
+        return ggx1 * ggx2;
+    }
+
+    fn fresnelSchlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
+        return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+    }
+
+    fn fresnelSchlickRoughness(cosTheta: f32, f0: vec3f, roughness: f32, albedo: vec3f, metallic: f32) -> vec3f {
+        let F0 = mix(f0, albedo, metallic);
+        return F0 + (max(vec3f(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
     }
     `
     return raytracer_kernel

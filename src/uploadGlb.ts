@@ -98,14 +98,16 @@ export class Triangle {
     private _centroid: Float32Array;
     private _ior: number;
     private _metalness: number;
+    private _roughness: number;
 
-    constructor(positions: Float32Array[], normals: Float32Array[], uv: Float32Array[], ior?: number, metalness?: number) {
+    constructor(positions: Float32Array[], normals: Float32Array[], uv: Float32Array[], ior?: number, metalness?: number, roughness?: number) {
         this._positions = positions;
         this._normals = normals;
         this._uv = uv;                   // ← now typechecks correctly
         this._ior = ior || 1.5;
         this._metalness = metalness || 0.0;
         this._centroid = new Float32Array([0, 0, 0]);
+        this._roughness = roughness;
         const weight = 1 / 3;
         for (const position of positions) {
             this._centroid[0] += position[0] * weight;
@@ -125,6 +127,8 @@ export class Triangle {
     get metalness(): number {
         return this._metalness;
     }
+
+    get roughness() { return this._roughness }
 }
 
 export class GLTFBuffer {
@@ -367,7 +371,8 @@ export class GLTFNode {
                 transformedNormals,
                 triangle.uv,
                 triangle.ior,
-                triangle.metalness
+                triangle.metalness,
+                triangle.roughness
             ));
         }
         return transformedTriangles;
@@ -906,8 +911,16 @@ export async function uploadGLBModel(buffer, device) {
 
             var triangles = []
             if (indices) {
-                const vertexPositions = new Float32Array(positions.elements.buffer);
-                const vertexNormals = normals ? new Float32Array(normals.elements.buffer) : null;
+                const vertexPositions = new Float32Array(
+                    positions.elements.buffer,
+                    positions.elements.byteOffset,
+                    positions.elements.length / 4 // length in floats, not bytes
+                );
+                const vertexNormals = normals ? new Float32Array(
+                    normals.elements.buffer,
+                    normals.elements.byteOffset,
+                    normals.elements.length / 4
+                ) : null;
                 const indicesArray = new Uint16Array(indices.elements.buffer);
                 const vertexUvs = texcoords?.[0] ? new Float32Array(texcoords[0].elements.buffer) : null;
 
@@ -926,10 +939,38 @@ export async function uploadGLBModel(buffer, device) {
 
                     let normalArrays: [Float32Array, Float32Array, Float32Array] | [] = [];
                     if (vertexNormals) {
-                        const normalOne = [vertexNormals[indexOne], vertexNormals[indexOne + 1], vertexNormals[indexOne + 2]];
-                        const normalTwo = [vertexNormals[indexTwo], vertexNormals[indexTwo + 1], vertexNormals[indexTwo + 2]];
-                        const normalThree = [vertexNormals[indexThree], vertexNormals[indexThree + 1], vertexNormals[indexThree + 2]];
-                        normalArrays = [new Float32Array(normalOne), new Float32Array(normalTwo), new Float32Array(normalThree)];
+                        const raw = [
+                            vertexNormals[indexOne], vertexNormals[indexOne + 1], vertexNormals[indexOne + 2], // n1
+                            vertexNormals[indexTwo], vertexNormals[indexTwo + 1], vertexNormals[indexTwo + 2], // n2
+                            vertexNormals[indexThree], vertexNormals[indexThree + 1], vertexNormals[indexThree + 2] // n3
+                        ];
+
+                        // Make sure all normals are unit vector
+                        const n1 = new Float32Array(3);
+                        const n2 = new Float32Array(3);
+                        const n3 = new Float32Array(3);
+                        const results = [n1, n2, n3];
+
+                        for (let j = 0; j < 3; j++) {
+                            const offset = j * 3;
+                            let x = raw[offset];
+                            let y = raw[offset + 1];
+                            let z = raw[offset + 2];
+
+                            const lenSq = x * x + y * y + z * z;
+
+                            if (lenSq > 0) {
+                                const invLen = 1.0 / Math.sqrt(lenSq);
+                                results[j][0] = x * invLen;
+                                results[j][1] = y * invLen;
+                                results[j][2] = z * invLen;
+                            } else {
+                                results[j][0] = 0;
+                                results[j][1] = 1;
+                                results[j][2] = 0;
+                            }
+                        }
+                        normalArrays = [n1, n2, n3];
                     }
 
                     let uvArrays: [Float32Array, Float32Array, Float32Array] | [] = [];
@@ -949,7 +990,8 @@ export async function uploadGLBModel(buffer, device) {
                         normalArrays,
                         uvArrays,
                         -1,
-                        material.metallicFactor
+                        material.metallicFactor,
+                        material.roughnessFactor
                     );
                     triangles.push(triangle);
                 }
