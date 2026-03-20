@@ -75,7 +75,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const utilsBindGroup = device.createBindGroup(
             { layout: utilsLayout, entries: [{ binding: 0, resource: { buffer: utilsBuf } }] });
 
-        const renderBundles = glbFile.buildRenderBundles(
+        const renderBundles = await glbFile.buildRenderBundles(
             device,
             shaderCache,
             viewParamsLayout,
@@ -128,7 +128,6 @@ document.addEventListener("DOMContentLoaded", () => {
         // For now assume only one material
         const material = materials[0];
 
-        // --- Base color ---
         let baseColorTextureView: GPUTextureView;
         if (material.baseColorTexture) {
             baseColorTextureView = material.baseColorTexture.imageView!;
@@ -137,21 +136,17 @@ document.addEventListener("DOMContentLoaded", () => {
             baseColorTextureView = solidColorTexture.createView();
         }
 
-        // --- Normal map ---
         let normalTextureView: GPUTextureView;
         let normalSamplerResource: GPUSampler;
         if (material.normalTexture && material.normalSampler) {
             normalTextureView = material.normalTexture.imageView!;
             normalSamplerResource = material.normalSampler;
         } else {
-            // Flat normal: (0.5, 0.5, 1.0) decodes to (0, 0, 1) in tangent space
             const flatNormalTexture = createSolidColorTexture(device, 0.5, 0.5, 1.0, 1.0);
             normalTextureView = flatNormalTexture.createView();
             normalSamplerResource = sampler;
         }
 
-        // --- Occlusion map ---
-        // Default: solid white (r=1.0) means fully lit / no occlusion
         let occlusionTextureView: GPUTextureView;
         let occlusionSamplerResource: GPUSampler;
         if (material.occlusionTexture && material.occlusionSampler) {
@@ -163,8 +158,6 @@ document.addEventListener("DOMContentLoaded", () => {
             occlusionSamplerResource = sampler;
         }
 
-        // --- Emissive map ---
-        // Default: solid black (0, 0, 0) means no emission
         let emissiveTextureView: GPUTextureView;
         let emissiveSamplerResource: GPUSampler;
         if (material.emissiveTexture && material.emissiveSampler) {
@@ -176,9 +169,6 @@ document.addEventListener("DOMContentLoaded", () => {
             emissiveSamplerResource = sampler;
         }
 
-        // --- Metallic-roughness map ---
-        // glTF ORM packing: g = roughness, b = metalness.
-        // Default: g=1.0 (fully rough), b=0.0 (non-metal) — matches typical dielectric defaults.
         let metallicRoughnessTextureView: GPUTextureView;
         let metallicRoughnessSamplerResource: GPUSampler;
         if (material.metallicRoughnessTexture && material.metallicRoughnessSampler) {
@@ -192,27 +182,31 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         const trianglesBuffer = device?.createBuffer({
-            size: 40 * Float32Array.BYTES_PER_ELEMENT * triangles.length,
+            size: 48 * Float32Array.BYTES_PER_ELEMENT * triangles.length,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
 
-        const trianglesUploadData = new Float32Array(triangles.length * 40);
+        const trianglesUploadData = new Float32Array(triangles.length * 48);
         for (let i = 0; i < triangles.length; i++) {
             const triangle = triangles[i];
             const defaultNormal = new Float32Array([0, 0, 1]);
             const defaultUv = new Float32Array([1, 1, 1]);
 
-            trianglesUploadData.set(triangle.positions[0], i * 40);
-            trianglesUploadData.set(triangle.normals[0] ?? defaultNormal[0], i * 40 + 4);
-            trianglesUploadData.set(triangle.positions[1], i * 40 + 8);
-            trianglesUploadData.set(triangle.normals[1] ?? defaultNormal[1], i * 40 + 12);
-            trianglesUploadData.set(triangle.positions[2], i * 40 + 16);
-            trianglesUploadData.set(triangle.normals[2] ?? defaultNormal[2], i * 40 + 20);
-            trianglesUploadData.set(triangle.uv[0] ?? defaultUv[0], i * 40 + 24);
-            trianglesUploadData.set(triangle.uv[1] ?? defaultUv[1], i * 40 + 26);
-            trianglesUploadData.set(triangle.uv[2] ?? defaultUv[2], i * 40 + 28);
-            trianglesUploadData.set([triangle.ior], i * 40 + 32);
-            trianglesUploadData.set([triangle.metalness], i * 40 + 36);
+            trianglesUploadData.set(triangle.positions[0], i * 48);
+            trianglesUploadData.set(triangle.normals[0] ?? defaultNormal[0], i * 48 + 4);
+            trianglesUploadData.set(triangle.positions[1], i * 48 + 8);
+            trianglesUploadData.set(triangle.normals[1] ?? defaultNormal[1], i * 48 + 12);
+            trianglesUploadData.set(triangle.positions[2], i * 48 + 16);
+            trianglesUploadData.set(triangle.normals[2] ?? defaultNormal[2], i * 48 + 20);
+            trianglesUploadData.set(triangle.uv[0] ?? defaultUv[0], i * 48 + 24);
+            trianglesUploadData.set(triangle.uv[1] ?? defaultUv[1], i * 48 + 26);
+            trianglesUploadData.set(triangle.uv[2] ?? defaultUv[2], i * 48 + 28);
+            trianglesUploadData.set([triangle.ior], i * 48 + 32);
+            trianglesUploadData.set([triangle.metalness], i * 48 + 36);
+            trianglesUploadData.set([triangle.roughness], i * 48 + 37);
+            trianglesUploadData.set(triangle.surfaceNormal, i * 48 + 40);
+            trianglesUploadData.set([triangle.surfaceNormalD], i * 48 + 43);
+            trianglesUploadData.set(triangle.barycentricW, i * 48 + 44);
         }
         device?.queue.writeBuffer(trianglesBuffer, 0, trianglesUploadData, 0);
 
@@ -325,7 +319,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 { binding: 6, resource: { buffer: triangle_indices_buffer } },
                 { binding: 7, resource: normalSamplerResource },
                 { binding: 8, resource: normalTextureView },
-                // --- New entries ---
                 { binding: 9, resource: occlusionSamplerResource },
                 { binding: 10, resource: occlusionTextureView },
                 { binding: 11, resource: emissiveSamplerResource },
@@ -337,7 +330,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const raytracer_kernel = shaderCache.getRayShader();
 
-        const rayTracingPipeline = device.createComputePipeline({
+        const rayTracingPipeline = await device.createComputePipelineAsync({
             layout: device.createPipelineLayout({
                 bindGroupLayouts: [rayTracingBindGroupLayout]
             }),
@@ -373,7 +366,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const screen_shader = shaderCache.getScreenShader();
 
-        const screenPipeline = device.createRenderPipeline({
+        const screenPipeline = await device.createRenderPipelineAsync({
             layout: device.createPipelineLayout({
                 bindGroupLayouts: [screenBindGroupLayout]
             }),
@@ -510,7 +503,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
             if (glbBuffer != null) {
                 glbFile = await uploadGLBModel(glbBuffer, device);
-                raster.renderBundles = glbFile.buildRenderBundles(
+                raster.renderBundles = await glbFile.buildRenderBundles(
                     device,
                     raster.shaderCache,
                     raster.viewParamsLayout,
@@ -533,29 +526,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 raster.renderPassDesc.colorAttachments[0].view = context.getCurrentTexture().createView();
 
                 projView = mat4.mul(projView, proj, camera.camera);
-                upload = device.createBuffer({
-                    size: 4 * 4 * 4,
-                    usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
-                    mappedAtCreation: true
-                });
-                new Float32Array(upload.getMappedRange()).set(projView);
-                upload.unmap();
+
+                device.queue.writeBuffer(raster.viewParamBuf, 0, projView);
 
                 const utilsData = new Float32Array(8);
                 utilsData.set([camera.camera[12], camera.camera[13], camera.camera[14]], 0);
                 utilsData.set(webUI.lightPosition, 4);
                 utilsData.set([webUI.usePBR], 7);
 
-                utilsUploadBuf = device.createBuffer({
-                    size: utilsData.byteLength,
-                    usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
-                    mappedAtCreation: true
-                });
-                new Float32Array(utilsUploadBuf.getMappedRange()).set(utilsData);
-                utilsUploadBuf.unmap();
-
-                commandEncoder.copyBufferToBuffer(upload, 0, raster.viewParamBuf, 0, 4 * 4 * 4);
-                commandEncoder.copyBufferToBuffer(utilsUploadBuf, 0, raster.utilsBuf, 0, utilsData.byteLength);
+                device.queue.writeBuffer(raster.utilsBuf, 0, utilsData);
 
                 var renderPass = commandEncoder.beginRenderPass(raster.renderPassDesc);
                 renderPass.executeBundles(raster.renderBundles);

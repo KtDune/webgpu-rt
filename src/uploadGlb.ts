@@ -92,43 +92,61 @@ function gltfTypeSize(componentType, type) {
 }
 
 export class Triangle {
-    private _positions: Float32Array[];  // 3 × vec3
-    private _normals: Float32Array[];    // 3 × vec3
+    private _positions: Float32Array[];
+    private _normals: Float32Array[];
     private _uv: Float32Array[];
     private _centroid: Float32Array;
     private _ior: number;
     private _metalness: number;
     private _roughness: number;
+    private _surface_normal: Float32Array;
+    private _surface_normal_d: number;
+    private _barycentric_w: Float32Array;
 
-    constructor(positions: Float32Array[], normals: Float32Array[], uv: Float32Array[], ior?: number, metalness?: number, roughness?: number) {
+    constructor(
+        positions: Float32Array[],
+        normals: Float32Array[],
+        uv: Float32Array[],
+        ior?: number,
+        metalness?: number,
+        roughness?: number
+    ) {
         this._positions = positions;
         this._normals = normals;
-        this._uv = uv;                   // ← now typechecks correctly
-        this._ior = ior || 1.5;
-        this._metalness = metalness || 0.0;
+        this._uv = uv;
+        this._ior = ior ?? 1.5;
+        this._metalness = metalness ?? 0.0;
+        this._roughness = roughness ?? 0.5;
+
+        // Centroid
         this._centroid = new Float32Array([0, 0, 0]);
-        this._roughness = roughness;
         const weight = 1 / 3;
         for (const position of positions) {
             this._centroid[0] += position[0] * weight;
             this._centroid[1] += position[1] * weight;
             this._centroid[2] += position[2] * weight;
         }
+
+        const edgeAB = vec3.sub(vec3.create(), positions[1], positions[0]);
+        const edgeAC = vec3.sub(vec3.create(), positions[2], positions[0]);
+        this._surface_normal = vec3.cross(vec3.create(), edgeAB, edgeAC);
+
+        this._surface_normal_d = vec3.dot(this._surface_normal, positions[0]);
+
+        const lenSq = vec3.dot(this._surface_normal, this._surface_normal);
+        this._barycentric_w = vec3.scale(vec3.create(), this._surface_normal, 1.0 / lenSq);
     }
 
     get positions(): Float32Array[] { return this._positions; }
     get normals(): Float32Array[] { return this._normals; }
-    get uv(): Float32Array[] { return this._uv; }       // ← renamed from color
+    get uv(): Float32Array[] { return this._uv; }
     get centroid(): Float32Array { return this._centroid; }
-    get ior(): number {
-        return this._ior;
-    }
-
-    get metalness(): number {
-        return this._metalness;
-    }
-
-    get roughness() { return this._roughness }
+    get ior(): number { return this._ior; }
+    get metalness(): number { return this._metalness; }
+    get roughness(): number { return this._roughness; }
+    get surfaceNormal(): Float32Array { return this._surface_normal; }
+    get surfaceNormalD(): number { return this._surface_normal_d; }
+    get barycentricW(): Float32Array { return this._barycentric_w; }
 }
 
 export class GLTFBuffer {
@@ -218,7 +236,7 @@ export class GLTFPrimitive {
     }
 
     // Build the primitive render commands into the bundle
-    buildRenderBundle(
+    async buildRenderBundle(
         device, shaderCache, bindGroupLayouts, bundleEncoder, swapChainFormat, depthFormat) {
         var shaderModule = shaderCache.getShader(
             this.normals, this.texcoords.length > 0, this.material.baseColorTexture, this.material);
@@ -286,7 +304,7 @@ export class GLTFPrimitive {
             depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' }
         };
 
-        var renderPipeline = device.createRenderPipeline(pipelineDescriptor);
+        var renderPipeline = await device.createRenderPipelineAsync(pipelineDescriptor);
 
         bundleEncoder.setPipeline(renderPipeline);
         bundleEncoder.setBindGroup(2, this.material.bindGroup);
@@ -390,7 +408,7 @@ export class GLTFNode {
         this.gpuUniforms = buf;
     }
 
-    buildRenderBundle(
+    async buildRenderBundle(
         device,
         shaderCache,
         viewParamsLayout,
@@ -423,7 +441,7 @@ export class GLTFNode {
         bundleEncoder.setBindGroup(3, utilsBindGroup);
 
         for (var i = 0; i < this.mesh.primitives.length; ++i) {
-            this.mesh.primitives[i].buildRenderBundle(device,
+            await this.mesh.primitives[i].buildRenderBundle(device,
                 shaderCache,
                 bindGroupLayouts,
                 bundleEncoder,
@@ -744,7 +762,7 @@ export class GLBModel {
         return this.nodes.flatMap(node => node.materials);
     }
 
-    buildRenderBundles(
+    async buildRenderBundles(
         device,
         shaderCache,
         viewParamsLayout,
@@ -756,7 +774,7 @@ export class GLBModel {
         var renderBundles = [];
         for (var i = 0; i < this.nodes.length; ++i) {
             var n = this.nodes[i];
-            var bundle = n.buildRenderBundle(
+            var bundle = await n.buildRenderBundle(
                 device,
                 shaderCache,
                 viewParamsLayout,

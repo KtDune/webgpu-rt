@@ -470,7 +470,10 @@ function generateRayShader() {
             uv_c: vec2<f32>,
             ior: vec4<f32>,
             metalness: f32,
-            roughness: f32
+            roughness: f32,
+            surface_normal: vec3<f32>,
+            surface_normal_d: f32,
+            barycentric_w: vec3<f32>,
         }
 
         struct BVHTree {
@@ -508,14 +511,14 @@ function generateRayShader() {
         struct RenderState {
             t: f32,
             color: vec3<f32>,
-            emissive: vec3<f32>,   // NEW: additive emissive contribution
+            emissive: vec3<f32>,
             hit: bool,
             scatter_direction: vec3<f32>,
             normal: vec3<f32>,
             hit_point: vec3<f32>,
             metalness: f32,
             roughness: f32,
-            occlusion: f32,        // NEW: ambient occlusion factor [0..1]
+            occlusion: f32,
         }
 
     fn compute_tbn(
@@ -554,24 +557,14 @@ function generateRayShader() {
         return normalize(TBN * tangent_normal);
     }
 
-    // --- New texture sampling helpers ---
-
-    // Returns the AO factor from the red channel (1.0 = fully lit, 0.0 = fully occluded)
     fn sample_occlusion(uv: vec2<f32>) -> f32 {
         return textureSampleLevel(occlusion_map, occlusion_sampler, uv, 0.0).r;
     }
 
-    // Returns the linear-space emissive colour. Multiply by an intensity scalar in the
-    // caller if you want artist-controlled strength beyond the texture value itself.
     fn sample_emissive(uv: vec2<f32>) -> vec3<f32> {
         return textureSampleLevel(emissive_map, emissive_sampler, uv, 0.0).rgb;
     }
 
-    // glTF 2.0 occlusion-roughness-metalness (ORM) packing:
-    //   r = occlusion  (ignored here — we have a dedicated AO map)
-    //   g = roughness
-    //   b = metalness
-    // Returns vec2(roughness, metalness).
     fn sample_metallic_roughness(uv: vec2<f32>) -> vec2<f32> {
         let orm = textureSampleLevel(metallic_roughness_map, metallic_roughness_sampler, uv, 0.0);
         return vec2<f32>(orm.g, orm.b); // (roughness, metalness)
@@ -760,7 +753,7 @@ function generateRayShader() {
 
         var edgeAB: vec3<f32>        = triangle.corner_b - triangle.corner_a;
         var edgeAC: vec3<f32>        = triangle.corner_c - triangle.corner_a;
-        var surface_normal: vec3<f32> = cross(edgeAB, edgeAC);
+        var surface_normal: vec3<f32> = triangle.surface_normal;
 
         var use_ior: bool = ior > 0.0 && (sample_number % 2u == 0u);
 
@@ -778,7 +771,7 @@ function generateRayShader() {
             return oldRenderState;
         }
 
-        var d = dot(surface_normal, triangle.corner_a);
+        var d = triangle.surface_normal_d;
         var t = (d - dot(surface_normal, ray.origin)) / tri_normal_dot_ray_dir;
         if (t < tMin || t > tMax) {
             return oldRenderState;
@@ -786,7 +779,7 @@ function generateRayShader() {
 
         var intersection_point: vec3<f32>       = ray.origin + t * ray.direction;
         var plane_intersection_point: vec3<f32> = intersection_point - triangle.corner_a;
-        var w = surface_normal / dot(surface_normal, surface_normal);
+        var w = triangle.barycentric_w;
 
         var u = dot(w, cross(plane_intersection_point, edgeAC));
         if (u < 0.0 || u > 1.0) {
@@ -917,7 +910,7 @@ function generateRayShader() {
     }
 
     fn random_in_unit_sphere(seed: vec2<f32>) -> vec3<f32> {
-        let phi       = 2.0 * 3.14159265 * random(seed);
+        let phi = 2.0 * 3.14159265 * random(seed);
         let cos_theta = 2.0 * random(vec2(seed.y, seed.x)) - 1.0;
         let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
         return vec3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
@@ -947,7 +940,7 @@ function generateRayShader() {
         let H = normalize(L + view_dir);
         let dist        = length(scene.lightPos - hit_point);
         let attenuation = 1.0 / (dist * dist);
-        let radiance    = vec3(1.0, 1.0, 1.0) * 50.0 * attenuation;
+        let radiance    = vec3(50.0) * attenuation;
 
         let NdotL = max(dot(normal, L), 0.0);
         let NdotV = max(dot(normal, view_dir), 0.0);
