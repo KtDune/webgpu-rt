@@ -305,11 +305,6 @@ function generateGLTFShader(hasNormals, hasUVs, hasColorTexture, material) {
         let L_world = lightPos_world - fin.position_world;
         var L_distance = length(L_world);
         let L = normalize(L_world);
-
-        // Clamp maximum distance to 5 units
-        if (L_distance > 5.0) {
-            L_distance = 5.0;
-        }
         
         // Light falloff (irradiance)
         let attenuation = 1.0 / (L_distance * L_distance + 1.0);
@@ -506,6 +501,7 @@ function generateRayShader() {
             aspectRatio: f32,
             fov: f32,
             lightPos: vec3<f32>,
+            usePBR: f32,
         }
 
         struct RenderState {
@@ -599,7 +595,7 @@ function generateRayShader() {
         var color: vec3<f32> = vec3(1.0, 1.0, 1.0);
 
         var worldRay: Ray;
-        worldRay.origin    = ray.origin;
+        worldRay.origin = ray.origin;
         worldRay.direction = ray.direction;
 
         var bounce: u32 = u32(0);
@@ -612,27 +608,32 @@ function generateRayShader() {
                 let hit_point = worldRay.origin + result.t * worldRay.direction;
                 let view_dir  = normalize(-worldRay.direction);
 
-                let to_light   = scene.lightPos - hit_point;
+                let to_light = scene.lightPos - hit_point;
                 let light_dist = length(to_light);
                 let shadow_factor = soft_shadow_factor(hit_point, result.normal, random_seed);
 
                 var direct = vec3(0.0);
-                if (shadow_factor > 0.0) {
-                    direct = pbr_point_light(
-                        hit_point,
-                        result.normal,
-                        view_dir,
-                        result.color,
-                        result.metalness,
-                        result.roughness
-                    );
-                    direct *= shadow_factor;
+                var ambient = vec3(0.0);
+
+                if (scene.usePBR == 1.0) {
+                    
+                    if (shadow_factor > 0.0) {
+                        direct = pbr_point_light(
+                            hit_point,
+                            result.normal,
+                            view_dir,
+                            result.color,
+                            result.metalness,
+                            result.roughness
+                        );
+                        direct *= shadow_factor;
+                    }
+                    ambient = result.color * 0.03 * result.occlusion;
+                } else {
+                    // Unlit: base color * occlusion + emissive (emissive added below)
+                    ambient = result.color * result.occlusion;
                 }
 
-                // Ambient term is modulated by the AO factor sampled in hit_triangle.
-                let ambient = result.color * 0.03 * result.occlusion;
-
-                // Emissive is additive and independent of lighting.
                 color *= (direct + ambient);
                 color += result.emissive;
 
@@ -751,8 +752,8 @@ function generateRayShader() {
         var ior: f32       = triangle.ior.x;
         var metalness: f32 = triangle.metalness;
 
-        var edgeAB: vec3<f32>        = triangle.corner_b - triangle.corner_a;
-        var edgeAC: vec3<f32>        = triangle.corner_c - triangle.corner_a;
+        var edgeAB: vec3<f32> = triangle.corner_b - triangle.corner_a;
+        var edgeAC: vec3<f32> = triangle.corner_c - triangle.corner_a;
         var surface_normal: vec3<f32> = triangle.surface_normal;
 
         var use_ior: bool = ior > 0.0 && (sample_number % 2u == 0u);
@@ -812,8 +813,6 @@ function generateRayShader() {
                 triangle.uv_a, triangle.uv_b, triangle.uv_c,
                 uv
             );
-
-            // --- Sample the new textures ---
 
             // Metallic-roughness: glTF ORM packing (g = roughness, b = metalness).
             // These override the per-triangle scalar values for full texel-level control.
@@ -964,7 +963,7 @@ function generateRayShader() {
     }
 
     fn soft_shadow_factor(hit_point: vec3<f32>, normal: vec3<f32>, random_seed: vec2<f32>) -> f32 {
-        let light_radius = 2.0;        // controls penumbra size
+        let light_radius = 2.0;
         let num_samples  = 4u;
         var lit_samples  = 0.0;
 

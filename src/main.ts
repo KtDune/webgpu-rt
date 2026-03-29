@@ -384,7 +384,6 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         });
 
-        // UPLOAD INITIAL SCENE PARAMS
         const maxBounces = 20;
         const sceneParamsUploadData = new Float32Array(24);
         sceneParamsUploadData.set([0, 0, 5], 0);
@@ -396,6 +395,7 @@ document.addEventListener("DOMContentLoaded", () => {
         sceneParamsUploadData.set([canvas.width / canvas.height], 16);
         sceneParamsUploadData.set([50 * Math.PI / 180.0], 17);
         sceneParamsUploadData.set([0, 1, 0], 20);
+        sceneParamsUploadData.set([1], 23);
         device.queue.writeBuffer(sceneParamsBuffer, 0, sceneParamsUploadData, 0);
 
         const triangleIndicesUploadData = new Float32Array(bvhTree.triangleIndices.length);
@@ -557,6 +557,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 sceneParamsUpdateData.set([canvas.width / canvas.height], 16);
                 sceneParamsUpdateData.set([50 * Math.PI / 180.0], 17);
                 sceneParamsUpdateData.set(webUI.lightPosition, 20);
+                sceneParamsUpdateData.set([webUI.usePBR], 23);
 
                 const sceneParamsUpdateBuffer = device.createBuffer({
                     size: 24 * Float32Array.BYTES_PER_ELEMENT,
