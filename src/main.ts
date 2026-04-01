@@ -35,7 +35,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
-    async function initRasterization(device: GPUDevice, glbFile: any, swapChainFormat: string, canvas: HTMLCanvasElement, shaderCache: GLBShaderCache) {
+    async function initRasterization(device: GPUDevice, glbFile: any, swapChainFormat: string, canvas: HTMLCanvasElement, shaderCache: GLBShaderCache, querySet?: GPUQuerySet) {
         const depthTexture = device.createTexture({
             size: { width: canvas.width, height: canvas.height, depthOrArrayLayers: 1 },
             format: "depth24plus-stencil8",
@@ -51,8 +51,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 depthStoreOp: "store",
                 stencilLoadOp: "clear",
                 stencilClearValue: 0,
-                stencilStoreOp: "store"
-            }
+                stencilStoreOp: "store",
+            },
+            ...(querySet && {
+                timestampWrites: {
+                    querySet,
+                    beginningOfPassWriteIndex: 0,
+                    endOfPassWriteIndex: 1,
+                },
+            }),
         };
 
         const viewParamsLayout = device.createBindGroupLayout({
@@ -99,7 +106,7 @@ document.addEventListener("DOMContentLoaded", () => {
         };
     }
 
-    async function initRaytrace(device: GPUDevice, glbFile: any, canvas: HTMLCanvasElement, shaderCache: GLBShaderCache) {
+    async function initRaytrace(device: GPUDevice, glbFile: any, canvas: HTMLCanvasElement, shaderCache: GLBShaderCache, querySet?: GPUQuerySet) {
         const colorBuffer = device.createTexture({
             size: [canvas.width, canvas.height],
             format: "rgba8unorm",
@@ -440,9 +447,16 @@ document.addEventListener("DOMContentLoaded", () => {
             document.getElementById("webgpu-canvas").setAttribute("style", "display:none;");
             return;
         }
-        var device = await adapter.requestDevice();
 
-        const response = await fetch("https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb");
+        const canTimestamp = adapter.features.has('timestamp-query');
+        const device = await adapter?.requestDevice({
+            requiredFeatures: [
+                ...(canTimestamp ? ['timestamp-query'] : []),
+            ],
+        });
+
+        // https://cdn.tinyglb.com/models/948af0a48823401badaeab1894c624ec.glb https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb
+        const response = await fetch("https://cdn.tinyglb.com/models/948af0a48823401badaeab1894c624ec.glb");
         const buffer = await response.arrayBuffer();
         let glbFile = await uploadGLBModel(buffer, device);
 
@@ -453,7 +467,27 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const shaderCache = new GLBShaderCache(device);
 
-        let raster = await initRasterization(device, glbFile, swapChainFormat, canvas, shaderCache);
+        const { querySet, resolveBuffer, resultBuffer } = (() => {
+            if (!canTimestamp) {
+                return {};
+            }
+
+            const querySet = device.createQuerySet({
+                type: 'timestamp',
+                count: 2,
+            });
+            const resolveBuffer = device.createBuffer({
+                size: querySet.count * 8,
+                usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+            });
+            const resultBuffer = device.createBuffer({
+                size: resolveBuffer.size,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+            return { querySet, resolveBuffer, resultBuffer };
+        })();
+
+        let raster = await initRasterization(device, glbFile, swapChainFormat, canvas, shaderCache, querySet);
         let raytrace = await initRaytrace(device, glbFile, canvas, shaderCache);
 
         camera = new ArcballCamera(defaultEye, center, up, 2, [canvas.width, canvas.height]);
@@ -493,13 +527,17 @@ document.addEventListener("DOMContentLoaded", () => {
             }
 
         var fpsDisplay = document.getElementById("fps");
-        var numFrames = 0;
-        var totalTimeMS = 0;
+        let then = 0;
+        let gpuTime = 0;
 
         const webUI = new WebUI();
 
-        const render = async () => {
+        const render = async (now) => {
             webUI.consumeUpdate();
+
+            now *= 0.001;  // convert to seconds
+            const deltaTime = now - then;
+            then = now;
 
             if (glbBuffer != null) {
                 glbFile = await uploadGLBModel(glbBuffer, device);
@@ -517,7 +555,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 raytrace = await initRaytrace(device, glbFile, canvas, shaderCache);
             }
 
-            var start = performance.now();
             var commandEncoder = device.createCommandEncoder();
 
             var upload = null;
@@ -566,7 +603,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 device.queue.writeBuffer(sceneParamsUpdateBuffer, 0, sceneParamsUpdateData, 0);
                 commandEncoder.copyBufferToBuffer(sceneParamsUpdateBuffer, 0, raytrace.sceneParamsBuffer, 0, 24 * Float32Array.BYTES_PER_ELEMENT);
                 // Compute pass
-                const rayTracerPass = commandEncoder.beginComputePass();
+                const rayTracerPass = commandEncoder.beginComputePass({
+                    ...(querySet && {
+                        timestampWrites: {
+                            querySet,
+                            beginningOfPassWriteIndex: 0,
+                            endOfPassWriteIndex: 1,
+                        },
+                    }),
+                });
                 rayTracerPass.setPipeline(raytrace.rayTracingPipeline);
                 rayTracerPass.setBindGroup(0, raytrace.rayTracingBindGroup);
                 rayTracerPass.dispatchWorkgroups(
@@ -592,18 +637,33 @@ document.addEventListener("DOMContentLoaded", () => {
                 renderPass.end();
             }
 
+            if (canTimestamp) {
+                commandEncoder.resolveQuerySet(querySet, 0, querySet.count, resolveBuffer, 0);
+                if (resultBuffer.mapState === 'unmapped') {
+                    commandEncoder.copyBufferToBuffer(resolveBuffer, 0, resultBuffer, 0, resultBuffer.size);
+                }
+            }
+
             device.queue.submit([commandEncoder.finish()]);
             await device.queue.onSubmittedWorkDone();
+
+            if (canTimestamp && resultBuffer.mapState === 'unmapped') {
+                await resultBuffer.mapAsync(GPUMapMode.READ);
+                const times = new BigUint64Array(resultBuffer.getMappedRange());
+                gpuTime = Number(times[1] - times[0]) / 1000;
+                resultBuffer.unmap();
+            }
 
             if (!rtMode) {
                 upload?.destroy();
                 utilsUploadBuf?.destroy();
             }
 
-            var end = performance.now();
-            numFrames += 1;
-            totalTimeMS += end - start;
-            fpsDisplay.innerHTML = `Avg. FPS ${Math.round(1000.0 * numFrames / totalTimeMS)}`;
+            fpsDisplay.innerHTML = `
+            FPS: ${(1 / deltaTime).toFixed(1)}\n
+            Frame Time: ${(deltaTime * 1000).toFixed(2)} ms\n
+            GPU Time: ${(gpuTime / 1000).toFixed(2)} ms
+            `;
             requestAnimationFrame(render);
         };
 
@@ -643,22 +703,4 @@ function createSolidColorTexture(device: GPUDevice, r: number, g: number, b: num
     });
     device.queue.writeTexture({ texture }, data, {}, { width: 1, height: 1 });
     return texture;
-}
-
-function resetCamera(camera, defaultEye, center, up) {
-    camera.reset(defaultEye, center, up)
-}
-
-
-function createAccumulationTexture(device: GPUDevice, width: number, height: number) {
-    accumulationTexture = device.createTexture({
-        size: { width, height },
-        format: 'rgba32float',      // float precision for accumulation
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
-    });
-}
-
-// Call this whenever camera moves or scene changes
-function resetAccumulation() {
-    frameCount = 0;
 }

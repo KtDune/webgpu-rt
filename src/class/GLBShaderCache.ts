@@ -978,7 +978,7 @@ function generateRayShader() {
                 0.0
             );
 
-            let sample_pos  = scene.lightPos + offset;
+            let sample_pos  = scene.lightPos.xyz + offset;
             let to_sample   = sample_pos - hit_point;
             let shadow_ray  = Ray(hit_point + normal * 0.001, normalize(to_sample));
 
