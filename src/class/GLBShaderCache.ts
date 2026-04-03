@@ -469,6 +469,7 @@ function generateRayShader() {
             surface_normal: vec3<f32>,
             surface_normal_d: f32,
             barycentric_w: vec3<f32>,
+            materialIndex: f32,
         }
 
         struct BVHTree {
@@ -504,6 +505,16 @@ function generateRayShader() {
             usePBR: f32,
         }
 
+        struct Material {
+            base_color: vec4<f32>,
+            emissive: vec4<f32>,
+            metallic: f32,
+            roughness: f32,
+            pad: vec2<f32>,
+        }
+
+        @group(0) @binding(15) var<storage, read> materials: array<Material>;
+
         struct RenderState {
             t: f32,
             color: vec3<f32>,
@@ -537,7 +548,10 @@ function generateRayShader() {
         return mat3x3<f32>(t, b, geo_normal);
     }
 
-    fn sample_normal_map(uv: vec2<f32>) -> vec3<f32> {
+    fn sample_normal_map(uv: vec2<f32>, matIdx: u32) -> vec3<f32> {
+        // Currently we have a single bound normal_map; per-material normal maps
+        // would require per-material texture bindings. For now, sample the bound
+        // normal map and return the tangent-space normal.
         let raw = textureSampleLevel(normal_map, normal_map_sampler, uv, 0.0).rgb;
         return normalize(raw * 2.0 - vec3(1.0));
     }
@@ -546,24 +560,31 @@ function generateRayShader() {
         geo_normal: vec3<f32>,
         corner_a: vec3<f32>, corner_b: vec3<f32>, corner_c: vec3<f32>,
         uv_a: vec2<f32>, uv_b: vec2<f32>, uv_c: vec2<f32>,
-        uv: vec2<f32>
+        uv: vec2<f32>, matIdx: u32
     ) -> vec3<f32> {
         let TBN = compute_tbn(corner_a, corner_b, corner_c, uv_a, uv_b, uv_c, geo_normal);
-        let tangent_normal = sample_normal_map(uv);
+        let tangent_normal = sample_normal_map(uv, matIdx);
         return normalize(TBN * tangent_normal);
     }
 
-    fn sample_occlusion(uv: vec2<f32>) -> f32 {
+    fn sample_occlusion(uv: vec2<f32>, matIdx: u32) -> f32 {
+        // Combine sampled occlusion with any per-material AO if present in future.
         return textureSampleLevel(occlusion_map, occlusion_sampler, uv, 0.0).r;
     }
 
-    fn sample_emissive(uv: vec2<f32>) -> vec3<f32> {
-        return textureSampleLevel(emissive_map, emissive_sampler, uv, 0.0).rgb;
+    fn sample_emissive(uv: vec2<f32>, matIdx: u32) -> vec3<f32> {
+        let tex = textureSampleLevel(emissive_map, emissive_sampler, uv, 0.0).rgb;
+        let m = materials[matIdx];
+        return tex * m.emissive.rgb;
     }
 
-    fn sample_metallic_roughness(uv: vec2<f32>) -> vec2<f32> {
+    fn sample_metallic_roughness(uv: vec2<f32>, matIdx: u32) -> vec2<f32> {
         let orm = textureSampleLevel(metallic_roughness_map, metallic_roughness_sampler, uv, 0.0);
-        return vec2<f32>(orm.g, orm.b); // (roughness, metalness)
+        let m = materials[matIdx];
+        // combine texture channels with per-material scalars, prefer higher/defined values
+        let roughness = max(orm.g, m.roughness);
+        let metalness = max(orm.b, m.metallic);
+        return vec2<f32>(roughness, metalness); // (roughness, metalness)
     }
 
     @compute @workgroup_size(8,8,1)
@@ -635,7 +656,9 @@ function generateRayShader() {
                 }
 
                 color *= (direct + ambient);
-                color += result.emissive;
+                if (bounce == 0u) {
+                    color += result.emissive;
+                }
 
                 worldRay.origin    = hit_point;
                 worldRay.direction = result.scatter_direction;
@@ -807,68 +830,78 @@ function generateRayShader() {
             scatter_direction = dielectric_scattering(ray, shading_normal, ior, front_face, random_seed);
             base_color        = vec3(1.0, 1.0, 1.0);
         } else {
+            let matIdx = u32(triangle.materialIndex);
             shading_normal = get_shading_normal(
                 geo_normal,
                 triangle.corner_a, triangle.corner_b, triangle.corner_c,
                 triangle.uv_a, triangle.uv_b, triangle.uv_c,
-                uv
+                uv, matIdx
             );
 
             // Metallic-roughness: glTF ORM packing (g = roughness, b = metalness).
-            // These override the per-triangle scalar values for full texel-level control.
-            let mr       = sample_metallic_roughness(uv);
-            let roughness_tex = mr.x;   // green channel
-            let metalness_tex = mr.y;   // blue channel
+            // Combine per-triangle scalar values with texture values (texture wins when higher)
+            var roughness_tex: f32 = triangle.roughness;
+            var metalness_tex: f32 = triangle.metalness;
+            // sample and combine (use material storage values as authoritative defaults)
+            let mat = materials[matIdx];
+            // sample texture values (if present) and combine with per-material scalars
+            let mr = sample_metallic_roughness(uv, matIdx);
+            roughness_tex *= mr.x;
+            metalness_tex  *= mr.y;
 
-            // Ambient occlusion from dedicated AO map (red channel).
-            ao = sample_occlusion(uv);
+            // Ambient occlusion from dedicated AO map (red channel). If AO map is missing,
+            // triangle-level AO defaults are preserved (we already set ao=1.0 above).
+            ao = sample_occlusion(uv, matIdx);
 
-            // Emissive — scale by a fixed strength multiplier if desired.
+            // Emissive — combine texture emissive with material emissive factor.
             let emissive_strength: f32 = 1.0;
-            emissive_color = sample_emissive(uv) * emissive_strength;
+            // sample_emissive now returns texture + per-material emissive, so avoid double-adding mat.emissive
+            emissive_color = emissive_color + sample_emissive(uv, matIdx) * emissive_strength;
 
-            // Use texture metalness for scatter decision (overrides per-triangle scalar).
+            // Base color: sample the base color texture and modulate by the material's base_color factor
+            // (host binds a 1x1 fallback texture when no texture is present).
+            base_color = textureSampleLevel(base_color_map, base_color_sampler, uv, 0.0).rgb * mat.base_color.rgb;
+
+            // Resolve final material scalars
+            metalness = metalness_tex;
+            var roughness_resolved: f32 = roughness_tex;
+
+            // Use metalness_tex to decide scattering. Pass roughness and seed to the
+            // metal scattering function to produce rough reflections (blurry metals).
             if (random(random_seed) < metalness_tex) {
-                scatter_direction = metal_scattering(ray, shading_normal);
+                scatter_direction = metal_scattering(ray, shading_normal, roughness_resolved, random_seed);
             } else {
                 scatter_direction = lambertian_scattering(shading_normal, random_seed);
             }
 
-            base_color = textureSampleLevel(base_color_map, base_color_sampler, uv, 0.0).rgb;
-
-            // Write back resolved PBR values into local variables so RenderState below
-            // captures the texture-sourced values, not the stale triangle scalars.
-            metalness = metalness_tex;
-            // roughness is kept separately — reuse the variable name below.
-            var roughness_resolved: f32 = roughness_tex;
-
-            var renderState: RenderState;
-            renderState.scatter_direction = normalize(scatter_direction);
-            renderState.t         = t;
-            renderState.hit       = true;
-            renderState.color     = base_color;
-            renderState.emissive  = emissive_color;
-            renderState.normal    = shading_normal;
-            renderState.hit_point = intersection_point;
-            renderState.metalness = metalness;
-            renderState.roughness = roughness_resolved;
-            renderState.occlusion = ao;
-            return renderState;
+            // Build and return RenderState (single local variable to avoid shadowing)
+            var rs: RenderState;
+            rs.scatter_direction = normalize(scatter_direction);
+            rs.t         = t;
+            rs.hit       = true;
+            rs.color     = base_color;
+            rs.emissive  = emissive_color;
+            rs.normal    = shading_normal;
+            rs.hit_point = intersection_point;
+            rs.metalness = metalness;
+            rs.roughness = roughness_resolved;
+            rs.occlusion = ao;
+            return rs;
         }
 
-        // Dielectric exit path (use_ior == true).
-        var renderState: RenderState;
-        renderState.scatter_direction = normalize(scatter_direction);
-        renderState.t         = t;
-        renderState.hit       = true;
-        renderState.color     = base_color;
-        renderState.emissive  = vec3(0.0);   // dielectrics don't emit
-        renderState.normal    = shading_normal;
-        renderState.hit_point = intersection_point;
-        renderState.metalness = triangle.metalness;
-        renderState.roughness = triangle.roughness;
-        renderState.occlusion = 1.0;         // no AO on glass
-        return renderState;
+    // Dielectric exit path (use_ior == true).
+    var rs: RenderState;
+    rs.scatter_direction = normalize(scatter_direction);
+    rs.t         = t;
+    rs.hit       = true;
+    rs.color     = base_color;
+    rs.emissive  = vec3(0.0);   // dielectrics don't emit
+    rs.normal    = shading_normal;
+    rs.hit_point = intersection_point;
+    rs.metalness = triangle.metalness;
+    rs.roughness = triangle.roughness;
+    rs.occlusion = 1.0;         // no AO on glass
+    return rs;
     }
 
     fn lambertian_scattering(normal: vec3<f32>, random_seed: vec2<f32>) -> vec3<f32> {
@@ -877,9 +910,13 @@ function generateRayShader() {
         return scatter_direction;
     }
 
-    fn metal_scattering(ray: Ray, normal: vec3<f32>) -> vec3<f32> {
-        var scatter_direction = reflect(normalize(ray.direction), normal);
-        return scatter_direction;
+    fn metal_scattering(ray: Ray, normal: vec3<f32>, roughness: f32, random_seed: vec2<f32>) -> vec3<f32> {
+        // Perfect reflection
+        let reflected = reflect(normalize(ray.direction), normal);
+        // Perturb reflection by a random vector scaled by roughness to simulate blurriness
+        let rand = normalize(random_in_unit_sphere(random_seed));
+        var perturbed = normalize(reflected + roughness * rand);
+        return perturbed;
     }
 
     fn dielectric_scattering(ray: Ray, normal: vec3<f32>, ior: f32, front_face: bool, random_seed: vec2<f32>) -> vec3<f32> {
@@ -935,28 +972,34 @@ function generateRayShader() {
         metalness: f32,
         roughness: f32
     ) -> vec3<f32> {
-        let L = normalize(scene.lightPos - hit_point);
-        let H = normalize(L + view_dir);
-        let dist        = length(scene.lightPos - hit_point);
+        // Rewritten PBR point light per user-provided formula
+        let light_dir = scene.lightPos - hit_point;
+        let dist = length(light_dir);
+        let L = normalize(light_dir);
+        let V = view_dir; // Expect caller to pass normalized view_dir
+        let H = normalize(L + V);
+
+        let NdotL = max(dot(normal, L), 0.0001); // small epsilon
+        let NdotV = max(dot(normal, V), 0.0001);
+        let HdotV = max(dot(H, V), 0.0);
+        let NdotH = max(dot(normal, H), 0.0);
+
+        // Boost radiance for testing (no distance attenuation)
+        // Note: you can re-enable attenuation: vec3(10.0) * (1.0 / (dist*dist))
         let attenuation = 1.0 / (dist * dist);
-        let radiance    = vec3(50.0) * attenuation;
-
-        let NdotL = max(dot(normal, L), 0.0);
-        let NdotV = max(dot(normal, view_dir), 0.0);
-        let HdotV = max(dot(H, view_dir), 0.0);
-
-        if (NdotL <= 0.0) {
-            return vec3(0.0);
-        }
+        let radiance = vec3(10.0);
 
         let F0 = mix(vec3(0.04), base_color, metalness);
-        let F   = fresnelSchlick(HdotV, F0);
+        let F = fresnelSchlick(HdotV, F0);
         let NDF = distributionGGX(normal, H, roughness);
-        let G   = geometrySmith(normal, view_dir, L, roughness);
+        let G = geometrySmith(normal, V, L, roughness);
 
-        let specular = (NDF * G * F) / max(4.0 * NdotV * NdotL, 0.0001);
+        let numerator = NDF * G * F;
+        let denominator = 4.0 * NdotV * NdotL;
+        let specular = numerator / max(denominator, 0.001);
 
-        let kD      = (1.0 - F) * (1.0 - metalness);
+        let kS = F;
+        let kD = (vec3(1.0) - kS) * (1.0 - metalness);
         let diffuse = kD * base_color / 3.14159265;
 
         return (diffuse + specular) * radiance * NdotL;

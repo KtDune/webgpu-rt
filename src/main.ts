@@ -132,8 +132,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const bvhTree = new BVHTree(triangles);
         const materials: GLTFMaterial[] = glbFile.materials;
 
-        // For now assume only one material
-        const material = materials[0];
+    const material = materials[0];
 
         let baseColorTextureView: GPUTextureView;
         if (material.baseColorTexture) {
@@ -176,17 +175,37 @@ document.addEventListener("DOMContentLoaded", () => {
             emissiveSamplerResource = sampler;
         }
 
-        let metallicRoughnessTextureView: GPUTextureView;
+    let metallicRoughnessTextureView: GPUTextureView;
         let metallicRoughnessSamplerResource: GPUSampler;
         if (material.metallicRoughnessTexture && material.metallicRoughnessSampler) {
             metallicRoughnessTextureView = material.metallicRoughnessTexture.imageView!;
             metallicRoughnessSamplerResource = material.metallicRoughnessSampler;
         } else {
-            // (r=0, g=1, b=0, a=1): roughness=1.0, metalness=0.0
             const defaultMRTexture = createSolidColorTexture(device, 0.0, 1.0, 0.0, 1.0);
             metallicRoughnessTextureView = defaultMRTexture.createView();
             metallicRoughnessSamplerResource = sampler;
         }
+
+        // PASS IN BASE, EMISSIVE
+        const materialsCount = materials.length;
+        const materialStride = 12;
+        const materialsUpload = new Float32Array(materialsCount * materialStride);
+        for (let i = 0; i < materialsCount; ++i) {
+            const m = materials[i];
+            const off = i * materialStride;
+            const base = m.baseColorFactor || [1, 1, 1, 1];
+            const emissive = m.emissiveFactor || [0, 0, 0, 1];
+            materialsUpload.set([base[0], base[1], base[2], base[3]], off + 0);
+            materialsUpload.set([emissive[0], emissive[1], emissive[2], emissive[3]], off + 4);
+            materialsUpload.set([m.metallicFactor ?? 0.0], off + 8);
+            materialsUpload.set([m.roughnessFactor ?? 1.0], off + 9);
+            materialsUpload.set([0.0, 0.0], off + 10);
+        }
+        const materialsBuffer = device.createBuffer({
+            size: materialsUpload.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(materialsBuffer, 0, materialsUpload, 0);
 
         const trianglesBuffer = device?.createBuffer({
             size: 48 * Float32Array.BYTES_PER_ELEMENT * triangles.length,
@@ -214,6 +233,7 @@ document.addEventListener("DOMContentLoaded", () => {
             trianglesUploadData.set(triangle.surfaceNormal, i * 48 + 40);
             trianglesUploadData.set([triangle.surfaceNormalD], i * 48 + 43);
             trianglesUploadData.set(triangle.barycentricW, i * 48 + 44);
+            trianglesUploadData.set([triangle.materialIndex ?? 0], i * 48 + 47);
         }
         device?.queue.writeBuffer(trianglesBuffer, 0, trianglesUploadData, 0);
 
@@ -280,7 +300,6 @@ document.addEventListener("DOMContentLoaded", () => {
                     visibility: GPUShaderStage.COMPUTE,
                     texture: {}
                 },
-                // --- New bindings ---
                 {
                     binding: 9,
                     visibility: GPUShaderStage.COMPUTE,
@@ -311,6 +330,11 @@ document.addEventListener("DOMContentLoaded", () => {
                     visibility: GPUShaderStage.COMPUTE,
                     texture: {}
                 },
+                {
+                    binding: 15,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: "read-only-storage" }
+                },
             ],
         });
 
@@ -332,6 +356,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 { binding: 12, resource: emissiveTextureView },
                 { binding: 13, resource: metallicRoughnessSamplerResource },
                 { binding: 14, resource: metallicRoughnessTextureView },
+                { binding: 15, resource: { buffer: materialsBuffer } },
             ]
         });
 
@@ -347,7 +372,6 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         });
 
-        // SCREEN PIPELINE
         const screenBindGroupLayout = device.createBindGroupLayout({
             entries: [
                 {
@@ -411,7 +435,6 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         device?.queue.writeBuffer(triangle_indices_buffer, 0, triangleIndicesUploadData, 0);
 
-        // UPLOAD BVH NODES
         const bvhNodesUploadData = new Float32Array(bvhTree.nodesUsed * 8);
         for (let i = 0; i < bvhTree.nodesUsed; i++) {
             bvhNodesUploadData.set(bvhTree.nodes[i].minCorner, i * 8);
@@ -455,8 +478,9 @@ document.addEventListener("DOMContentLoaded", () => {
             ],
         });
 
-        // https://cdn.tinyglb.com/models/948af0a48823401badaeab1894c624ec.glb https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb
-        const response = await fetch("https://cdn.tinyglb.com/models/948af0a48823401badaeab1894c624ec.glb");
+        // https://cdn.tinyglb.com/models/948af0a48823401badaeab1894c624ec.glb
+        // https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb
+        const response = await fetch("https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb");
         const buffer = await response.arrayBuffer();
         let glbFile = await uploadGLBModel(buffer, device);
 
@@ -535,7 +559,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const render = async (now) => {
             webUI.consumeUpdate();
 
-            now *= 0.001;  // convert to seconds
+            now *= 0.001;
             const deltaTime = now - then;
             then = now;
 
@@ -602,7 +626,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 });
                 device.queue.writeBuffer(sceneParamsUpdateBuffer, 0, sceneParamsUpdateData, 0);
                 commandEncoder.copyBufferToBuffer(sceneParamsUpdateBuffer, 0, raytrace.sceneParamsBuffer, 0, 24 * Float32Array.BYTES_PER_ELEMENT);
-                // Compute pass
                 const rayTracerPass = commandEncoder.beginComputePass({
                     ...(querySet && {
                         timestampWrites: {
@@ -621,7 +644,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 );
                 rayTracerPass.end();
 
-                // Screen pass
                 const textureView = context.getCurrentTexture().createView();
                 const renderPass = commandEncoder.beginRenderPass({
                     colorAttachments: [{

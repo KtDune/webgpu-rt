@@ -7,8 +7,6 @@ const GLTFRenderMode = {
     LINE_STRIP: 3,
     TRIANGLES: 4,
     TRIANGLE_STRIP: 5,
-    // Note: fans are not supported in WebGPU, use should be
-    // an error or converted into a list/strip
     TRIANGLE_FAN: 6,
 };
 
@@ -102,6 +100,7 @@ export class Triangle {
     private _surface_normal: Float32Array;
     private _surface_normal_d: number;
     private _barycentric_w: Float32Array;
+    private _materialIndex: number;
 
     constructor(
         positions: Float32Array[],
@@ -109,7 +108,8 @@ export class Triangle {
         uv: Float32Array[],
         ior?: number,
         metalness?: number,
-        roughness?: number
+        roughness?: number,
+        materialIndex?: number
     ) {
         this._positions = positions;
         this._normals = normals;
@@ -117,6 +117,7 @@ export class Triangle {
         this._ior = ior ?? 1.5;
         this._metalness = metalness ?? 0.0;
         this._roughness = roughness ?? 0.5;
+        this._materialIndex = materialIndex ?? 0;
 
         // Centroid
         this._centroid = new Float32Array([0, 0, 0]);
@@ -147,6 +148,7 @@ export class Triangle {
     get surfaceNormal(): Float32Array { return this._surface_normal; }
     get surfaceNormalD(): number { return this._surface_normal_d; }
     get barycentricW(): Float32Array { return this._barycentric_w; }
+    get materialIndex(): number { return this._materialIndex; }
 }
 
 export class GLTFBuffer {
@@ -390,7 +392,8 @@ export class GLTFNode {
                 triangle.uv,
                 triangle.ior,
                 triangle.metalness,
-                triangle.roughness
+                triangle.roughness,
+                triangle.materialIndex
             ));
         }
         return transformedTriangles;
@@ -932,7 +935,7 @@ export async function uploadGLBModel(buffer, device) {
                 const vertexPositions = new Float32Array(
                     positions.elements.buffer,
                     positions.elements.byteOffset,
-                    positions.elements.length / 4 // length in floats, not bytes
+                    positions.elements.length / 4
                 );
                 const vertexNormals = normals ? new Float32Array(
                     normals.elements.buffer,
@@ -1009,7 +1012,8 @@ export async function uploadGLBModel(buffer, device) {
                         uvArrays,
                         -1,
                         material.metallicFactor,
-                        material.roughnessFactor
+                        material.roughnessFactor,
+                        prim['material'] ?? 0
                     );
                     triangles.push(triangle);
                 }
